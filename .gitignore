@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.venv/
+venv/
+
+# IDE / system
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+
+# 本机配置可能包含 SESSDATA、个人素材绝对路径等敏感信息
+config.json
+
+# 构建产物通过 GitHub Releases 分发，不提交到源码仓库
+dist/
+build/
+build-*/
+*.spec

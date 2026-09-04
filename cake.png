@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <title>可爱生日蛋糕</title>
+  <desc>一块带草莓、奶油和蜡烛的粉色生日蛋糕矢量图标</desc>
+
+  <defs>
+    <linearGradient id="cakeBody" x1="140" y1="252" x2="372" y2="438" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFB8C8"/>
+      <stop offset="1" stop-color="#FF8EAA"/>
+    </linearGradient>
+    <linearGradient id="flame" x1="256" y1="58" x2="256" y2="104" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF0A8"/>
+      <stop offset="1" stop-color="#FF9C43"/>
+    </linearGradient>
+    <filter id="shadow" x="82" y="174" width="348" height="298" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="10" flood-color="#9B4D69" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <!-- 烛火 -->
+  <path d="M256 54C240 72 240 86 247 96C252 103 260 104 266 99C278 89 270 70 256 54Z" fill="url(#flame)" stroke="#7D4055" stroke-width="7" stroke-linejoin="round"/>
+
+  <!-- 蜡烛 -->
+  <path d="M236 104H276V202H236V104Z" fill="#FFF4C4" stroke="#7D4055" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M239 130L273 112M239 164L273 146M239 198L273 180" stroke="#FF779B" stroke-width="10"/>
+
+  <g filter="url(#shadow)">
+    <!-- 蛋糕主体 -->
+    <path d="M120 274C120 245.281 143.281 222 172 222H340C368.719 222 392 245.281 392 274V406C392 422.569 378.569 436 362 436H150C133.431 436 120 422.569 120 406V274Z" fill="url(#cakeBody)" stroke="#7D4055" stroke-width="10"/>
+
+    <!-- 奶油顶层 -->
+    <path d="M120 276C120 246.177 144.177 222 174 222H338C367.823 222 392 246.177 392 276V292C384 310 368 316 354 316C333 316 328 296 309 296C288 296 287 329 263 329C239 329 238 297 216 297C195 297 192 316 171 316C151 316 136 305 120 290V276Z" fill="#FFF8EE" stroke="#7D4055" stroke-width="10" stroke-linejoin="round"/>
+
+    <!-- 夹心 -->
+    <path d="M125 358H387" stroke="#FFF0D6" stroke-width="18"/>
+    <path d="M125 358H387" stroke="#7D4055" stroke-width="8"/>
+
+    <!-- 装饰糖珠 -->
+    <circle cx="163" cy="272" r="9" fill="#FFD45E"/>
+    <circle cx="211" cy="254" r="8" fill="#75C8B1"/>
+    <circle cx="302" cy="259" r="9" fill="#7FB5FF"/>
+    <circle cx="350" cy="275" r="8" fill="#FFD45E"/>
+
+    <!-- 草莓 -->
+    <path d="M256 218C233 218 220 198 225 179C229 164 241 156 256 156C271 156 283 164 287 179C292 198 279 218 256 218Z" fill="#FF5F70" stroke="#7D4055" stroke-width="8" stroke-linejoin="round"/>
+    <path d="M237 162C243 149 252 147 256 157C260 147 269 149 275 162C263 159 249 159 237 162Z" fill="#62B87C" stroke="#7D4055" stroke-width="7" stroke-linejoin="round"/>
+    <circle cx="244" cy="181" r="3.5" fill="#FFE28A"/>
+    <circle cx="266" cy="181" r="3.5" fill="#FFE28A"/>
+    <circle cx="255" cy="198" r="3.5" fill="#FFE28A"/>
+  </g>
+
+  <!-- 盘子 -->
+  <path d="M92 438H420C420 456 405.673 470 388 470H124C106.327 470 92 456 92 438Z" fill="#B9E7E1" stroke="#7D4055" stroke-width="10" stroke-linejoin="round"/>
+</svg>

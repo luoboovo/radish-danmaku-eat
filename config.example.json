@@ -1,0 +1,39 @@
+{
+  "version": 2,
+  "room_id": "",
+  "sessdata": "",
+  "food_images": [],
+  "consumer_image": "",
+  "initial_food_count": 10,
+  "manual_step": 1,
+  "food_size": 72,
+  "consumer_size": 190,
+  "sound_enabled": true,
+  "sound_files": {
+    "add": "",
+    "remove": "",
+    "eat": "",
+    "gift": ""
+  },
+  "food_image_order": "random",
+  "food_layout_mode": "piles",
+  "danmaku_match_mode": "exact",
+  "danmaku_case_sensitive": false,
+  "danmaku_rules": [
+    {"keyword": "投喂", "delta": 1},
+    {"keyword": "吃", "delta": -1}
+  ],
+  "gift_food_rules": [
+    {"gift_name": "辣条", "operation": "add", "value": 1.0}
+  ],
+  "gift_range_rules": [
+    {"gift_name": "小花花", "seconds": 10}
+  ],
+  "range_hit_mode": "intersects",
+  "range_radius": 150,
+  "user_cooldown_seconds": 1.0,
+  "stats_visible": true,
+  "stats_scale": 1.0,
+  "stats_x_ratio": 0.03,
+  "stats_y_ratio": 0.03
+}
