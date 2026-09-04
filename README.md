@@ -8,6 +8,10 @@
 
 > 本项目是非官方开源项目，与哔哩哔哩没有隶属或合作关系。
 
+## 下载 Windows 版
+
+不想配置 Python 环境时，可以前往 [GitHub Releases](https://github.com/luoboovo/radish-danmaku-eat/releases/latest) 下载最新的单文件 EXE，双击即可运行。Release 同时提供 SHA-256 校验文件。
+
 ## 功能特色
 
 - 白色极简直播控制台与纯透明置顶游戏窗口相互独立。
