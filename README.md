@@ -10,7 +10,11 @@
 
 ## 下载 Windows 版
 
-不想配置 Python 环境时，可以前往 [GitHub Releases](https://github.com/luoboovo/radish-danmaku-eat/releases/latest) 下载最新的单文件 EXE，双击即可运行。Release 同时提供 SHA-256 校验文件。
+不想配置 Python 环境时，可以前往 [GitHub Releases](https://github.com/luoboovo/radish-danmaku-eat/releases/latest) 下载：
+
+- `*-setup.exe`：带中文安装向导、开始菜单快捷方式和卸载程序的安装版（推荐）。
+- `*-windows.exe`：无需安装的单文件便携版。
+- `*.sha256.txt`：对应安装包的 SHA-256 校验文件。
 
 ## 功能特色
 
@@ -122,7 +126,11 @@ radish-danmaku-eat/
 │  ├─ settings_window.py      # 白色直播控制台
 │  └─ sound.py                # 内置及自定义音效播放
 ├─ vendor/                    # blivedm 官方 wheel
+├─ installer/
+│  ├─ ChineseSimplified.isl   # 安装向导简体中文翻译
+│  └─ ChineseSimplified.LICENSE.txt
 ├─ config.example.json        # 脱敏配置示例
+├─ installer.iss              # Inno Setup 安装版构建脚本
 ├─ requirements.txt
 ├─ cake.svg / cake.ico        # 应用图标
 └─ LICENSE
@@ -142,6 +150,17 @@ pyinstaller --noconfirm --onefile --windowed `
 ```
 
 生成结果位于 `dist/`。该目录默认不会提交到 Git 仓库，建议通过 GitHub Releases 分发打包版本。
+
+## 构建 Windows 安装版
+
+先按上一节生成便携版，并将文件命名为 `radish-danmaku-eat-v版本号-windows.exe`。安装 [Inno Setup 6](https://jrsoftware.org/isinfo.php) 后执行：
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" `
+  /DAppVersion=1.3.1 installer.iss
+```
+
+安装包输出到 `dist/radish-danmaku-eat-v1.3.1-setup.exe`。安装版采用当前用户安装方式，不要求管理员权限；个人配置会保存在安装目录中，卸载时默认保留。
 
 ## 参与贡献
 
