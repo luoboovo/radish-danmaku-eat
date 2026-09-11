@@ -100,6 +100,9 @@ class FoodItem(QLabel):
         self.collision_radius = size * 0.42
         self.is_sleeping = False
         self.free_falling = False
+        # 自由拖放或竖列补位时使用食物自己的垂直落点，不能写进全局槽位缓存，
+        # 否则同槽位后续食物会继承错误坐标并留下空洞。
+        self.gravity_target: Optional[QPoint] = None
         self.pile_slot = -1
 
     def release_media(self) -> None:
@@ -1252,90 +1255,102 @@ class GameWindow(QWidget):
         if slot >= 0:
             heapq.heappush(self._free_pile_slots, slot)
 
-    def _compact_pile_slots(self) -> None:
-        """只压紧被吃空的同一小堆，让上层食物向下补位。"""
-        # 均匀铺满模式不存在上下层关系，空槽留给下一份新增食物复用。
-        if self.config.get("food_layout_mode", "piles") == "spread":
-            return
-        if not self.food_items:
+    def _compact_pile_slots(
+        self, excluded_items: Optional[set[FoodItem]] = None
+    ) -> None:
+        """按当前视觉竖列压紧食物，让空洞上方的食物垂直下落。"""
+        excluded = excluded_items or set()
+        stacked_items = [
+            item
+            for item in self.food_items
+            if item not in excluded and item.pile_slot >= 0
+        ]
+        if not stacked_items:
             self._free_pile_slots.clear()
             self._next_pile_slot = 0
             return
-        by_pile: Dict[int, List[tuple[int, FoodItem]]] = {}
-        for item in self.food_items:
-            pile_index, local_index = self._pile_slot_info(item.pile_slot)
-            by_pile.setdefault(pile_index, []).append((local_index, item))
-        for entries in by_pile.values():
-            entries.sort(key=lambda value: value[0])
 
-        target_slots: Dict[int, List[int]] = {
-            pile_index: [] for pile_index in by_pile
-        }
-        slot = 0
-        while any(
-            len(target_slots[pile]) < len(by_pile[pile]) for pile in by_pile
-        ):
-            pile_index, _ = self._pile_slot_info(slot)
-            if (
-                pile_index in target_slots
-                and len(target_slots[pile_index]) < len(by_pile[pile_index])
-            ):
-                target_slots[pile_index].append(slot)
-            slot += 1
+        column_count = self._pile_column_count()
+        by_column: Dict[int, List[FoodItem]] = {}
+        for item in stacked_items:
+            column = self._nearest_pile_column(
+                item.x() + item.width() / 2.0, column_count
+            )
+            by_column.setdefault(column, []).append(item)
 
         occupied_slots = set()
-        for pile_index, entries in by_pile.items():
-            for (_, item), new_slot in zip(entries, target_slots[pile_index]):
-                occupied_slots.add(new_slot)
-                if item.pile_slot == new_slot:
-                    continue
-                item.pile_slot = new_slot
-                item.physics_x = float(item.x())
-                item.physics_y = float(item.y())
-                item.velocity_x = 0.0
-                item.velocity_y = max(0.0, item.velocity_y)
-                item.is_sleeping = False
-                # 补位时保留食物当前横向位置、尺寸和旋转，只改变纵向目标。
-                # 这样画面里能看到真实重力下落，而不是整堆横向“刷新重排”。
-                target = self._pile_target(new_slot, item.width())
-                cache_key = (new_slot, item.width(), self.width(), self.height())
-                self._pile_target_cache[cache_key] = QPoint(
-                    item.x(),
-                    max(target.y(), item.y()),
+        for column, entries in by_column.items():
+            # 屏幕坐标越大越靠下；先锁定每列最底部的食物，再依次安排上层。
+            entries.sort(
+                key=lambda item: (
+                    -item.y(),
+                    self._pile_slot_info(item.pile_slot)[1],
+                    item.pile_slot,
                 )
+            )
+            for level, item in enumerate(entries):
+                new_slot = level * column_count + column
+                occupied_slots.add(new_slot)
+                item.pile_slot = new_slot
+                canonical_target = self._pile_target(new_slot, item.width())
+                # 只允许向下补位，不瞬移也不横向吸附；即使食物曾被自由拖放，
+                # 当前竖列中存在空洞时，上方物体仍会落到下一层表面。
+                if canonical_target.y() > item.y() + 1:
+                    item.physics_x = float(item.x())
+                    item.physics_y = float(item.y())
+                    item.velocity_x = 0.0
+                    item.velocity_y = max(0.0, item.velocity_y)
+                    item.is_sleeping = False
+                    item.free_falling = False
+                    item.gravity_target = QPoint(item.x(), canonical_target.y())
 
-        self._next_pile_slot = max(occupied_slots, default=-1) + 1
+        self._rebuild_pile_allocator(occupied_slots)
+        if any(not item.is_sleeping for item in stacked_items):
+            self._wake_physics()
+
+    def _rebuild_pile_allocator(self, occupied_slots: Optional[set[int]] = None) -> None:
+        """根据当前占用槽位重建分配器，避免释放、拖放后出现幽灵占位。"""
+        occupied = occupied_slots
+        if occupied is None:
+            occupied = {
+                item.pile_slot for item in self.food_items if item.pile_slot >= 0
+            }
+        self._next_pile_slot = max(occupied, default=-1) + 1
         self._free_pile_slots = [
             candidate
             for candidate in range(self._next_pile_slot)
-            if candidate not in occupied_slots
+            if candidate not in occupied
         ]
         heapq.heapify(self._free_pile_slots)
-        if any(not item.is_sleeping for item in self.food_items):
-            self._wake_physics()
 
-    def _pile_slot_info(self, slot: int) -> tuple[int, int]:
-        """返回稳定槽位所属的小堆，以及该食物在堆内的生长序号。"""
+    def _pile_column_count(self) -> int:
+        """按游戏宽度计算横向堆积列数。"""
         base_size = self._base_food_size()
         margin = max(6, round(base_size * 0.10))
         usable_width = max(base_size, self.width() - margin * 2)
-        pile_count = max(1, min(8, round(usable_width / max(1, base_size * 5.2))))
-        pile_weights = [
-            4 + int(self._slot_noise(index, 57) * 4)
-            for index in range(pile_count)
-        ]
-        schedule = [
-            index
-            for round_index in range(max(pile_weights))
-            for index, weight in enumerate(pile_weights)
-            if weight > round_index
-        ]
-        schedule_position = int(slot) % len(schedule)
-        pile_index = schedule[schedule_position]
-        completed_cycles = int(slot) // len(schedule)
-        earlier_same_pile = schedule[:schedule_position].count(pile_index)
-        local_index = completed_cycles * pile_weights[pile_index] + earlier_same_pile
-        return pile_index, local_index
+        spacing_x = max(12, round(base_size * 0.72))
+        return max(1, int(max(0, usable_width - base_size) / spacing_x) + 1)
+
+    def _nearest_pile_column(self, center_x: float, column_count: int) -> int:
+        """把自由落点归入最近竖列，之后该列仍能正常向下补位。"""
+        if column_count <= 1:
+            return 0
+        base_size = self._base_food_size()
+        margin = max(6, round(base_size * 0.10))
+        left_center = margin + base_size / 2.0
+        right_center = self.width() - margin - base_size / 2.0
+        step = max(1.0, (right_center - left_center) / (column_count - 1))
+        return max(
+            0,
+            min(column_count - 1, round((center_x - left_center) / step)),
+        )
+
+    def _pile_slot_info(self, slot: int) -> tuple[int, int]:
+        """返回稳定槽位所属竖列，以及该食物从底部起的层数。"""
+        column_count = self._pile_column_count()
+        column_index = int(slot) % column_count
+        level = int(slot) // column_count
+        return column_index, level
 
     @staticmethod
     def _slot_noise(slot: int, salt: int) -> float:
@@ -1349,9 +1364,7 @@ class GameWindow(QWidget):
         return value / 0xFFFFFFFF
 
     def _pile_target(self, slot: int, size: int) -> QPoint:
-        """多个稳定自然小堆：重叠、错位、不同高度，但坐标不会自行变化。"""
-        if self.config.get("food_layout_mode", "piles") == "spread":
-            return self._spread_target(slot, size)
+        """从底部横向铺层并逐层堆高，稳定后不会逐帧抖动。"""
         cache_key = (int(slot), int(size), self.width(), self.height())
         cached = self._pile_target_cache.get(cache_key)
         if cached is not None:
@@ -1359,112 +1372,39 @@ class GameWindow(QWidget):
         base_size = self._base_food_size()
         margin = max(6, round(base_size * 0.10))
         usable_width = max(base_size, self.width() - margin * 2)
-        # 不同宽高比会自动增减小堆数量；每个小堆约占 5 个食物宽度。
-        pile_count = max(1, min(8, round(usable_width / max(1, base_size * 5.2))))
-        pile_span = usable_width / pile_count
-        spacing_x = max(10, round(base_size * 0.54))
-        spacing_y = max(9, round(base_size * 0.45))
-        base_capacity = max(3, int(pile_span / spacing_x))
-        max_levels = max(
-            2,
-            int(max(base_size, self.height() - margin * 2 - base_size) / spacing_y)
-            + 1,
+        spacing_x = max(12, round(base_size * 0.72))
+        spacing_y = max(10, round(base_size * 0.61))
+        column_count = max(
+            1,
+            int(max(0, usable_width - base_size) / spacing_x) + 1,
         )
+        column, level = self._pile_slot_info(slot)
 
-        # 各堆使用不同生长权重，食物总数相同也会自然形成高低不同的小堆。
-        pile_index, local_index = self._pile_slot_info(slot)
+        # 每层在水平方向轻微错开，再叠加确定性小扰动，视觉上像相互挤压的
+        # 松散食物堆；扰动只由槽位决定，因此静止后不会抽搐。
+        if column_count == 1:
+            center_x = self.width() / 2.0
+        else:
+            left_center = margin + base_size / 2.0
+            right_center = self.width() - margin - base_size / 2.0
+            column_step = (right_center - left_center) / (column_count - 1)
+            stagger = (column_step * 0.18) * (1 if level % 2 else -1)
+            jitter_x = (self._slot_noise(slot, 41) - 0.5) * base_size * 0.25
+            center_x = left_center + column * column_step + stagger + jitter_x
 
-        # 每个堆从底层中央向两侧生长，再逐层向上收窄；每堆宽度也略有差异。
-        pile_capacity = max(
-            3,
-            base_capacity
-            + round((self._slot_noise(pile_index, 63) - 0.5) * 3),
-        )
-        row_capacities = [
-            max(2, round(pile_capacity * (1.0 - 0.72 * level / max_levels)))
-            for level in range(max_levels)
-        ]
-        positions_per_pile = max(1, sum(row_capacities))
-        depth_layer, position_index = divmod(local_index, positions_per_pile)
-
-        level = 0
-        while position_index >= row_capacities[level]:
-            position_index -= row_capacities[level]
-            level += 1
-        capacity = row_capacities[level]
-        # 中间、左、右依次放置，少量食物时也会先形成一团而非整齐横排。
-        column_order = sorted(
-            range(capacity),
-            key=lambda column: (
-                abs(column - (capacity - 1) / 2.0),
-                self._slot_noise(column + level * 37, pile_index + 19),
-            ),
-        )
-        column = column_order[position_index]
-
-        pile_center = (
-            margin
-            + (pile_index + 0.5) * pile_span
-            + (self._slot_noise(pile_index, 41) - 0.5) * base_size * 0.62
-        )
-        jitter_x = (self._slot_noise(slot, 1) - 0.5) * base_size * 0.44
-        jitter_y = (self._slot_noise(slot, 2) - 0.5) * base_size * 0.34
-        depth_x = (self._slot_noise(depth_layer, pile_index + 73) - 0.5) * base_size * 0.22
-        depth_y = (depth_layer % 5) * base_size * 0.025
-        center_x = (
-            pile_center
-            + (column - (capacity - 1) / 2.0) * spacing_x
-            + jitter_x
-            + depth_x
-        )
-        floor_offset = self._slot_noise(pile_index, 91) * base_size * 0.34
+        jitter_y = (self._slot_noise(slot, 73) - 0.5) * base_size * 0.12
         x = round(center_x - size / 2.0)
-        y = round(
-            self.height()
-            - size
-            - margin
-            - floor_offset
-            - level * spacing_y
-            + jitter_y
-            - depth_y
-        )
+        y = round(self.height() - size - margin - level * spacing_y + jitter_y)
         x = min(max(margin, x), max(margin, self.width() - size - margin))
         y = min(max(margin, y), max(margin, self.height() - size - margin))
         result = QPoint(x, y)
         self._pile_target_cache[cache_key] = result
         return QPoint(result)
 
-    @staticmethod
-    def _halton(index: int, base: int) -> float:
-        """低差异序列，比纯随机更均匀，同时新增食物不会挪动旧食物。"""
-        result = 0.0
-        fraction = 1.0
-        value = max(1, int(index))
-        while value:
-            fraction /= base
-            result += fraction * (value % base)
-            value //= base
-        return result
-
-    def _spread_target(self, slot: int, size: int) -> QPoint:
-        """在整个游戏区域稳定均匀铺开，数量变化时旧位置保持不动。"""
-        cache_key = (int(slot), int(size), self.width(), self.height())
-        cached = self._pile_target_cache.get(cache_key)
-        if cached is not None:
-            return QPoint(cached)
-        margin = max(6, round(self._base_food_size() * 0.10))
-        usable_x = max(0, self.width() - size - margin * 2)
-        usable_y = max(0, self.height() - size - margin * 2)
-        # 2、3 为互质底数，生成覆盖全屏且不出现明显直线的稳定坐标。
-        x = margin + round(self._halton(slot + 1, 2) * usable_x)
-        y = margin + round(self._halton(slot + 1, 3) * usable_y)
-        result = QPoint(x, y)
-        self._pile_target_cache[cache_key] = result
-        return QPoint(result)
-
     def _reflow_pile(self) -> None:
-        """窗口尺寸改变时按比例重排自然小堆，坐标一次到位、不产生抖动。"""
+        """窗口尺寸改变时重排分层食物堆，坐标一次到位、不产生抖动。"""
         for item in self.food_items:
+            item.gravity_target = None
             target = self._pile_target(item.pile_slot, item.width())
             if item.is_sleeping:
                 item.physics_x = float(target.x())
@@ -1538,6 +1478,7 @@ class GameWindow(QWidget):
     def _spawn_food_item(self, item: FoodItem) -> None:
         """新增食物从对应稳定槽位上方落下。"""
         size = item.width()
+        item.gravity_target = None
         target = self._pile_target(item.pile_slot, size)
         x = float(target.x())
         y = float(random.randint(-size, 8))
@@ -1584,7 +1525,11 @@ class GameWindow(QWidget):
         gravity = 1650.0 * self._display_scale
         auto_eaten: List[FoodItem] = []
         for item in active_items:
-            target = self._pile_target(item.pile_slot, item.width())
+            target = (
+                QPoint(item.gravity_target)
+                if item.gravity_target is not None
+                else self._pile_target(item.pile_slot, item.width())
+            )
             target_x = float(target.x())
             horizontal_gap = target_x - item.physics_x
             if abs(horizontal_gap) <= 0.6:
@@ -1892,14 +1837,45 @@ class GameWindow(QWidget):
         self._clear_drag_state()
 
     def _release_items_to_gravity(self, items: List[FoodItem]) -> None:
-        """在当前位置松手后自由下落，不再弹回原来的槽位。"""
+        """释放旧槽位并在当前位置垂直下落，同时压紧原竖列。"""
         dropped = [item for item in items if item in self.food_items]
         if not dropped:
             return
         excluded = set(dropped)
+        # 拖走的食物不再占用原槽位；先让原位置上方的物体向下补齐。
+        for item in dropped:
+            self._release_pile_slot(item.pile_slot)
+            item.pile_slot = -1
+            item.gravity_target = None
+        self._compact_pile_slots(excluded)
+
+        column_count = self._pile_column_count()
+        column_levels = {column: 0 for column in range(column_count)}
+        occupied_slots = {
+            item.pile_slot
+            for item in self.food_items
+            if item not in excluded and item.pile_slot >= 0
+        }
+        for slot in occupied_slots:
+            column, level = self._pile_slot_info(slot)
+            column_levels[column] = max(column_levels[column], level + 1)
+
+        # 先处理位置较低的物体，范围拖放时仍保持大致的上下关系。
+        dropped.sort(key=lambda food: food.y(), reverse=True)
         for item in dropped:
             x = max(0, min(self.width() - item.width(), item.x()))
             y = max(0, min(self.height() - item.height(), item.y()))
+            column = self._nearest_pile_column(
+                x + item.width() / 2.0, column_count
+            )
+            level = column_levels[column]
+            slot = level * column_count + column
+            while slot in occupied_slots:
+                level += 1
+                slot = level * column_count + column
+            item.pile_slot = slot
+            occupied_slots.add(slot)
+            column_levels[column] = level + 1
             item.move(x, y)
             item.physics_x = float(x)
             item.physics_y = float(y)
@@ -1908,8 +1884,8 @@ class GameWindow(QWidget):
             item.is_sleeping = False
             item.free_falling = True
             target_y = self._free_drop_target_y(item, excluded)
-            cache_key = (item.pile_slot, item.width(), self.width(), self.height())
-            self._pile_target_cache[cache_key] = QPoint(x, max(y, target_y))
+            item.gravity_target = QPoint(x, max(y, target_y))
+        self._rebuild_pile_allocator(occupied_slots)
         self._wake_physics()
 
     def _free_drop_target_y(self, item: FoodItem, excluded: set) -> int:
@@ -2048,23 +2024,47 @@ class GameWindow(QWidget):
         self, center: QPoint, radius: int
     ) -> List[FoodItem]:
         contains = self.config.get("range_hit_mode") == "contains"
-        return [
+        matches = [
             item
             for item in self.food_items
             if self._circle_matches_rect(center, radius, item.geometry(), contains)
         ]
+        matches.sort(
+            key=lambda item: (
+                (item.geometry().center().x() - center.x()) ** 2
+                + (item.geometry().center().y() - center.y()) ** 2,
+                item.pile_slot,
+            )
+        )
+        return matches[: self._range_pickup_limit()]
 
     def _items_matching_original_circle(
         self, center: QPoint, radius: int
     ) -> List[FoodItem]:
         contains = self.config.get("range_hit_mode") == "contains"
-        return [
-            item
+        matches = [
+            (item, QRect(start, item.size()))
             for item, start in self._marquee_all_positions.items()
             if self._circle_matches_rect(
                 center, radius, QRect(start, item.size()), contains
             )
         ]
+        matches.sort(
+            key=lambda entry: (
+                (entry[1].center().x() - center.x()) ** 2
+                + (entry[1].center().y() - center.y()) ** 2,
+                entry[0].pile_slot,
+            )
+        )
+        return [item for item, _rect in matches[: self._range_pickup_limit()]]
+
+    def _range_pickup_limit(self) -> int:
+        """单次范围拾取数量上限；旧配置缺失时默认 100。"""
+        try:
+            value = int(self.config.get("range_pickup_limit", 100))
+        except (TypeError, ValueError):
+            value = 100
+        return max(1, min(10000, value))
 
     def _consumer_hit(self, local_pos: QPoint) -> bool:
         # 以松开鼠标的位置为准，避免多个食物保留间距时难以全部塞进贴图。

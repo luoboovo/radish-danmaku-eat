@@ -1,8 +1,8 @@
 ; 萝卜弹幕吃吃吃 Windows 安装程序（Inno Setup 6）
-; 构建示例：ISCC.exe /DAppVersion=1.3.1 installer.iss
+; 构建示例：ISCC.exe /DAppVersion=1.4.0 installer.iss
 
 #ifndef AppVersion
-  #define AppVersion "1.3.1"
+  #define AppVersion "1.4.0"
 #endif
 
 #define AppName "萝卜弹幕吃吃吃"

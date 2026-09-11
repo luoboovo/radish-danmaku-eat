@@ -816,13 +816,11 @@ class SettingsWindow(QMainWindow):
         self.food_order_combo = QComboBox()
         self.food_order_combo.addItem("随机选择贴图", "random")
         self.food_order_combo.addItem("按列表顺序循环", "sequential")
-        self.food_layout_combo = QComboBox()
-        self.food_layout_combo.addItem("堆积成多个自然小山", "piles")
-        self.food_layout_combo.addItem("均匀铺满整个游戏区域", "spread")
         self.range_hit_combo = QComboBox()
         self.range_hit_combo.addItem("食物碰到圆形范围就选中", "intersects")
         self.range_hit_combo.addItem("食物完整位于圆内才选中", "contains")
         self.range_radius_spin = self._spin(25, 1000, " px")
+        self.range_pickup_limit_spin = self._spin(1, 10000, " 个")
         self.sound_checkbox = QCheckBox("启用轻量提示音")
 
         pairs = [
@@ -831,7 +829,7 @@ class SettingsWindow(QMainWindow):
             ("食物显示尺寸", self.food_size_spin),
             ("食用者显示尺寸", self.consumer_size_spin),
             ("多食物贴图顺序", self.food_order_combo),
-            ("食物排列方式", self.food_layout_combo),
+            ("单次范围最多抓取", self.range_pickup_limit_spin),
             ("圆形命中规则", self.range_hit_combo),
             ("按住食物时的圆形半径", self.range_radius_spin),
         ]
@@ -842,13 +840,13 @@ class SettingsWindow(QMainWindow):
         layout.addWidget(QLabel("游戏音效"), 4, 0)
         layout.addWidget(self.sound_checkbox, 4, 1)
         scale_note = QLabel(
-            "显示器适配：以上尺寸以 1920×1080 为基准，游戏会按圈选区域和系统 DPI 自动缩放。"
+            "食物会从底部开始逐层自然堆高，数量足够时可堆满整个游戏区域；不会散布悬浮。"
         )
         scale_note.setWordWrap(True)
         scale_note.setStyleSheet("color: #27866a; font-weight: 600;")
         layout.addWidget(scale_note, 5, 0, 1, 4)
         note = QLabel(
-            "范围模式中：按住一个食物会按设定半径抓取附近食物；从空白处拖动可自由拉出圆形范围。"
+            "范围模式中：按住食物或从空白处拉出圆形范围；命中数量超过上限时，优先抓取离圆心最近的食物。"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #777771;")
@@ -1101,9 +1099,9 @@ class SettingsWindow(QMainWindow):
                 config.get("sound_files", {}).get(event_name, "")
             )
         self._set_combo(self.food_order_combo, config["food_image_order"])
-        self._set_combo(self.food_layout_combo, config["food_layout_mode"])
         self._set_combo(self.range_hit_combo, config["range_hit_mode"])
         self.range_radius_spin.setValue(config["range_radius"])
+        self.range_pickup_limit_spin.setValue(config["range_pickup_limit"])
         self._set_combo(self.match_mode_combo, config["danmaku_match_mode"])
         self.case_checkbox.setChecked(config["danmaku_case_sensitive"])
         self.cooldown_spin.setValue(config["user_cooldown_seconds"])
@@ -1185,7 +1183,7 @@ class SettingsWindow(QMainWindow):
             "sound_enabled": self.sound_checkbox.isChecked(),
             "sound_files": self._sound_files_from_ui(),
             "food_image_order": self.food_order_combo.currentData(),
-            "food_layout_mode": self.food_layout_combo.currentData(),
+            "food_layout_mode": "piles",
             "danmaku_match_mode": self.match_mode_combo.currentData(),
             "danmaku_case_sensitive": self.case_checkbox.isChecked(),
             "danmaku_rules": self.danmaku_table.get_rows("keyword", "delta"),
@@ -1193,6 +1191,7 @@ class SettingsWindow(QMainWindow):
             "gift_range_rules": self.gift_range_table.get_rows("gift_name", "seconds"),
             "range_hit_mode": self.range_hit_combo.currentData(),
             "range_radius": self.range_radius_spin.value(),
+            "range_pickup_limit": self.range_pickup_limit_spin.value(),
             "user_cooldown_seconds": self.cooldown_spin.value(),
             "stats_visible": self.stats_toggle_button.isChecked(),
             "stats_scale": self._config.get("stats_scale", 1.0),

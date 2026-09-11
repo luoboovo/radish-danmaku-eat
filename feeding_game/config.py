@@ -41,6 +41,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     ],
     "range_hit_mode": "intersects",
     "range_radius": 150,
+    "range_pickup_limit": 100,
     "user_cooldown_seconds": 1.0,
     "stats_visible": True,
     "stats_scale": 1.0,
@@ -99,8 +100,9 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
     config.pop("max_visible_foods", None)
     if config.get("food_image_order") not in {"random", "sequential"}:
         config["food_image_order"] = "random"
-    if config.get("food_layout_mode") not in {"piles", "spread"}:
-        config["food_layout_mode"] = "piles"
+    # 旧版的 spread 会把食物直接散布到整个画面，不符合重力堆积语义。
+    # 读取旧配置时统一迁移成从底部逐层向上生长的自然堆积模式。
+    config["food_layout_mode"] = "piles"
     if config.get("danmaku_match_mode") not in {"exact", "contains"}:
         config["danmaku_match_mode"] = "exact"
     config["danmaku_case_sensitive"] = bool(
@@ -115,6 +117,9 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
         legacy_height = _int_value(source.get("range_box_height"), 220, 50, 2000)
         radius_value = max(legacy_width, legacy_height) // 2
     config["range_radius"] = _int_value(radius_value, 150, 25, 1000)
+    config["range_pickup_limit"] = _int_value(
+        config.get("range_pickup_limit"), 100, 1, 10000
+    )
     config.pop("range_box_width", None)
     config.pop("range_box_height", None)
     config["user_cooldown_seconds"] = _float_value(

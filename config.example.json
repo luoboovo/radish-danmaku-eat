@@ -31,6 +31,7 @@
   ],
   "range_hit_mode": "intersects",
   "range_radius": 150,
+  "range_pickup_limit": 100,
   "user_cooldown_seconds": 1.0,
   "stats_visible": true,
   "stats_scale": 1.0,
