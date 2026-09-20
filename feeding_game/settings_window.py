@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PyQt5.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QCloseEvent, QIcon, QPainter, QPen, QPolygon
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QCompleter,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -21,12 +22,15 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -38,8 +42,10 @@ from PyQt5.QtWidgets import (
 )
 
 from .config import normalize_config
+from .gift_catalog import GiftCatalogSyncThread, load_cached_gifts
 from .media import load_pixmap, set_label_media
 from .sound import GameSoundPlayer
+from .templates import builtin_templates, materialize_builtin_template
 
 
 IMAGE_FILTER = "图片文件 (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.svg);;所有文件 (*)"
@@ -49,6 +55,47 @@ SOUND_EVENTS = (
     ("remove", "减少食物"),
     ("eat", "吃掉食物"),
     ("gift", "收到礼物"),
+)
+GIFT_RULE_TEMPLATE_PRESETS = (
+    {
+        "id": "daily_feed",
+        "name": "日常投喂",
+        "description": "人气票投喂 10、花花投喂 100、小花花开启范围拾取 3 秒",
+        "gift_food_rules": [
+            {"gift_name": "人气票", "operation": "add", "value": 10.0},
+            {"gift_name": "花花", "operation": "add", "value": 100.0},
+        ],
+        "gift_range_rules": [
+            {"gift_name": "小花花", "seconds": 3},
+        ],
+    },
+    {
+        "id": "double_challenge",
+        "name": "倍率挑战",
+        "description": "一整套包含增加、减少、乘以、除以与范围拾取的玩法",
+        "gift_food_rules": [
+            {"gift_name": "人气票", "operation": "add", "value": 10.0},
+            {"gift_name": "辣条", "operation": "subtract", "value": 20.0},
+            {"gift_name": "牛哇牛哇", "operation": "multiply", "value": 2.0},
+            {"gift_name": "打call", "operation": "divide", "value": 2.0},
+        ],
+        "gift_range_rules": [
+            {"gift_name": "小花花", "seconds": 5},
+        ],
+    },
+    {
+        "id": "wind_party",
+        "name": "大风派对",
+        "description": "包含普通投喂、刮大风、清空和限时范围拾取",
+        "gift_food_rules": [
+            {"gift_name": "人气票", "operation": "add", "value": 10.0},
+            {"gift_name": "打call", "operation": "wind", "value": 1.0},
+            {"gift_name": "这个好诶", "operation": "clear", "value": 1.0},
+        ],
+        "gift_range_rules": [
+            {"gift_name": "小花花", "seconds": 8},
+        ],
+    },
 )
 
 
@@ -64,6 +111,24 @@ class EditableNumberInput(QSpinBox):
         self.lineEdit().setCursor(Qt.IBeamCursor)
         self.lineEdit().setPlaceholderText("请输入数字")
         self.setToolTip("点击输入数字，按 Enter 确认")
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        # 禁止滚动设置页时误改数值；用户仍可点击后直接键盘输入。
+        event.ignore()
+
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """禁用滚轮改值，避免滚动页面时意外修改规则。"""
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        event.ignore()
+
+
+class NoWheelComboBox(QComboBox):
+    """禁用滚轮切换下拉项，选项只能通过点击主动修改。"""
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        event.ignore()
 
 
 class MediaPreview(QLabel):
@@ -199,13 +264,91 @@ class RangePickupDemo(QWidget):
         painter.end()
 
 
+class GiftNameCombo(NoWheelComboBox):
+    """带礼物图标、搜索补全，同时允许保留手工输入名称。"""
+
+    def __init__(self, gifts: Optional[List[Dict]] = None, parent=None) -> None:
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.setIconSize(QSize(30, 30))
+        self.setMaxVisibleItems(14)
+        self.lineEdit().setPlaceholderText("输入或选择礼物")
+        completer = QCompleter(self.model(), self)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.setCompleter(completer)
+        self.set_catalog(gifts or [])
+
+    def set_catalog(self, gifts: List[Dict]) -> None:
+        current = self.currentText().strip()
+        current_id = self.selected_gift_id()
+        self.blockSignals(True)
+        self.clear()
+        for gift in gifts:
+            name = str(gift.get("name", "")).strip()
+            if not name:
+                continue
+            icon_path = str(gift.get("icon_path", "")).strip()
+            icon = QIcon(icon_path) if icon_path else QIcon()
+            price = int(gift.get("price", 0) or 0)
+            self.addItem(icon, name, gift)
+            index = self.count() - 1
+            if price > 0:
+                self.setItemData(index, f"{name} · {price / 1000:g} 元", Qt.ToolTipRole)
+        self.set_gift_name(current, current_id)
+        self.blockSignals(False)
+
+    def set_gift_name(self, name: str, gift_id: int = 0) -> None:
+        """显式选择对应项，确保图标与文字来自同一条礼物记录。"""
+        target_name = str(name).strip()
+        target_id = int(gift_id or 0)
+        matched = -1
+        if target_id:
+            for index in range(self.count()):
+                gift = self.itemData(index) or {}
+                if int(gift.get("id", 0) or 0) == target_id:
+                    matched = index
+                    break
+        # B 站可能为同名礼物更新 ID；旧 ID 不存在时按名称迁移到当前项。
+        if matched < 0:
+            matched = self.findText(target_name, Qt.MatchExactly)
+        if matched >= 0:
+            self.setCurrentIndex(matched)
+        else:
+            self.setCurrentIndex(-1)
+            self.setEditText(target_name)
+
+    def selected_gift_id(self) -> int:
+        gift = self.currentData() or {}
+        if str(gift.get("name", "")).strip() != self.currentText().strip():
+            return 0
+        return int(gift.get("id", 0) or 0)
+
+    def selected_gift(self) -> Dict:
+        """仅在输入文字与目录项完全一致时返回绑定的礼物数据。"""
+        gift = self.currentData() or {}
+        if str(gift.get("name", "")).strip() != self.currentText().strip():
+            return {}
+        return dict(gift)
+
+
 class RuleTable(QWidget):
     """两列规则表，第二列固定为整数。"""
 
-    def __init__(self, first_title: str, second_title: str, parent=None) -> None:
+    def __init__(
+        self,
+        first_title: str,
+        second_title: str,
+        parent=None,
+        gift_picker: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.first_title = first_title
         self.second_title = second_title
+        self.gift_picker = bool(gift_picker)
+        self._gift_catalog: List[Dict] = []
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels([first_title, second_title])
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -214,7 +357,7 @@ class RuleTable(QWidget):
 
         add_button = QPushButton("＋ 添加规则")
         remove_button = QPushButton("删除选中")
-        add_button.clicked.connect(lambda: self.add_row("", 1))
+        add_button.clicked.connect(lambda: self.add_row("", 1, 0))
         remove_button.clicked.connect(self.remove_selected)
 
         button_layout = QHBoxLayout()
@@ -227,11 +370,26 @@ class RuleTable(QWidget):
         layout.addWidget(self.table)
         layout.addLayout(button_layout)
 
-    def add_row(self, name: str, value: int) -> None:
+    def add_row(self, name: str, value: int, gift_id: int = 0) -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem(str(name)))
+        if self.gift_picker:
+            combo = GiftNameCombo(self._gift_catalog)
+            combo.set_gift_name(str(name), gift_id)
+            self.table.setCellWidget(row, 0, combo)
+            self.table.setRowHeight(row, 48)
+        else:
+            self.table.setItem(row, 0, QTableWidgetItem(str(name)))
         self.table.setItem(row, 1, QTableWidgetItem(str(value)))
+
+    def set_gift_catalog(self, gifts: List[Dict]) -> None:
+        self._gift_catalog = list(gifts)
+        if not self.gift_picker:
+            return
+        for row in range(self.table.rowCount()):
+            combo = self.table.cellWidget(row, 0)
+            if isinstance(combo, GiftNameCombo):
+                combo.set_catalog(self._gift_catalog)
 
     def remove_selected(self) -> None:
         rows = sorted({item.row() for item in self.table.selectedItems()}, reverse=True)
@@ -241,36 +399,52 @@ class RuleTable(QWidget):
     def set_rows(self, rows: List[Dict], name_key: str, value_key: str) -> None:
         self.table.setRowCount(0)
         for row in rows:
-            self.add_row(str(row.get(name_key, "")), int(row.get(value_key, 1)))
+            self.add_row(
+                str(row.get(name_key, "")),
+                int(row.get(value_key, 1)),
+                int(row.get("gift_id", 0) or 0),
+            )
 
     def get_rows(self, name_key: str, value_key: str) -> List[Dict]:
         rows: List[Dict] = []
         for row in range(self.table.rowCount()):
+            name_widget = self.table.cellWidget(row, 0)
             name_item = self.table.item(row, 0)
             value_item = self.table.item(row, 1)
-            name = name_item.text().strip() if name_item else ""
+            if isinstance(name_widget, GiftNameCombo):
+                name = name_widget.currentText().strip()
+            else:
+                name = name_item.text().strip() if name_item else ""
             if not name:
                 continue
             try:
                 value = int(value_item.text().strip()) if value_item else 0
             except ValueError as error:
                 raise ValueError(f"{self.first_title}“{name}”的{self.second_title}必须是整数") from error
-            rows.append({name_key: name, value_key: value})
+            result = {name_key: name, value_key: value}
+            if self.gift_picker and isinstance(name_widget, GiftNameCombo):
+                gift_id = name_widget.selected_gift_id()
+                if gift_id:
+                    result["gift_id"] = gift_id
+            rows.append(result)
         return rows
 
 
 class GiftFoodRuleTable(QWidget):
-    """礼物食物运算表：每条规则可选择加、减、乘、除。"""
+    """礼物食物运算表：支持固定运算、清空和随机风暴。"""
 
     OPERATIONS = (
         ("增加", "add"),
         ("减少", "subtract"),
         ("乘以", "multiply"),
         ("除以", "divide"),
+        ("清空", "clear"),
+        ("刮大风", "wind"),
     )
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._gift_catalog: List[Dict] = []
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["礼物名称", "运算方式", "数值 / 倍数"])
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -279,7 +453,7 @@ class GiftFoodRuleTable(QWidget):
 
         add_button = QPushButton("＋ 添加规则")
         remove_button = QPushButton("删除选中")
-        add_button.clicked.connect(lambda: self.add_row("", "add", 1.0))
+        add_button.clicked.connect(lambda: self.add_row("", "add", 1.0, 0))
         remove_button.clicked.connect(self.remove_selected)
         actions = QHBoxLayout()
         actions.addWidget(add_button)
@@ -291,11 +465,15 @@ class GiftFoodRuleTable(QWidget):
         layout.addWidget(self.table)
         layout.addLayout(actions)
 
-    def add_row(self, gift_name: str, operation: str, value: float) -> None:
+    def add_row(
+        self, gift_name: str, operation: str, value: float, gift_id: int = 0
+    ) -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem(str(gift_name)))
-        operation_combo = QComboBox()
+        gift_combo = GiftNameCombo(self._gift_catalog)
+        gift_combo.set_gift_name(str(gift_name), gift_id)
+        self.table.setCellWidget(row, 0, gift_combo)
+        operation_combo = NoWheelComboBox()
         for label, data in self.OPERATIONS:
             operation_combo.addItem(label, data)
         index = operation_combo.findData(operation)
@@ -303,6 +481,48 @@ class GiftFoodRuleTable(QWidget):
         self.table.setCellWidget(row, 1, operation_combo)
         value_text = f"{float(value):g}"
         self.table.setItem(row, 2, QTableWidgetItem(value_text))
+        operation_combo.currentIndexChanged.connect(
+            lambda _index, combo=operation_combo: self._operation_changed(combo)
+        )
+        self._operation_changed(operation_combo)
+        self.table.setRowHeight(row, 48)
+
+    def _operation_changed(self, combo: QComboBox) -> None:
+        row = next(
+            (
+                index
+                for index in range(self.table.rowCount())
+                if self.table.cellWidget(index, 1) is combo
+            ),
+            -1,
+        )
+        if row < 0:
+            return
+        value_item = self.table.item(row, 2)
+        if value_item is None:
+            value_item = QTableWidgetItem("1")
+            self.table.setItem(row, 2, value_item)
+        operation = str(combo.currentData() or "add")
+        if operation in {"clear", "wind"}:
+            value_item.setText("—")
+            value_item.setFlags(value_item.flags() & ~Qt.ItemIsEditable)
+            value_item.setToolTip(
+                "此操作不需要数值"
+                if operation == "clear"
+                else "随机增加或减少当前食物的 10%～50%"
+            )
+        else:
+            if value_item.text().strip() in {"", "—"}:
+                value_item.setText("2" if operation in {"multiply", "divide"} else "1")
+            value_item.setFlags(value_item.flags() | Qt.ItemIsEditable)
+            value_item.setToolTip("")
+
+    def set_gift_catalog(self, gifts: List[Dict]) -> None:
+        self._gift_catalog = list(gifts)
+        for row in range(self.table.rowCount()):
+            combo = self.table.cellWidget(row, 0)
+            if isinstance(combo, GiftNameCombo):
+                combo.set_catalog(self._gift_catalog)
 
     def remove_selected(self) -> None:
         rows = sorted({item.row() for item in self.table.selectedItems()}, reverse=True)
@@ -316,29 +536,40 @@ class GiftFoodRuleTable(QWidget):
                 str(row.get("gift_name", "")),
                 str(row.get("operation", "add")),
                 float(row.get("value", 1.0)),
+                int(row.get("gift_id", 0) or 0),
             )
 
     def get_rows(self) -> List[Dict]:
         result: List[Dict] = []
         for row in range(self.table.rowCount()):
-            name_item = self.table.item(row, 0)
+            name_widget = self.table.cellWidget(row, 0)
             value_item = self.table.item(row, 2)
-            gift_name = name_item.text().strip() if name_item else ""
+            gift_name = (
+                name_widget.currentText().strip()
+                if isinstance(name_widget, GiftNameCombo)
+                else ""
+            )
             if not gift_name:
                 continue
             operation_combo = self.table.cellWidget(row, 1)
             operation = operation_combo.currentData() if operation_combo else "add"
-            try:
-                value = float(value_item.text().strip()) if value_item else 0.0
-            except ValueError as error:
-                raise ValueError(f"礼物“{gift_name}”的数值/倍数必须是数字") from error
-            if value <= 0:
-                raise ValueError(f"礼物“{gift_name}”的数值/倍数必须大于 0")
-            if operation in {"multiply", "divide"} and value <= 1:
-                raise ValueError(f"礼物“{gift_name}”的乘除倍数必须大于 1")
-            result.append(
-                {"gift_name": gift_name, "operation": operation, "value": value}
-            )
+            if operation in {"clear", "wind"}:
+                value = 1.0
+            else:
+                try:
+                    value = float(value_item.text().strip()) if value_item else 0.0
+                except ValueError as error:
+                    raise ValueError(f"礼物“{gift_name}”的数值/倍数必须是数字") from error
+                if value <= 0:
+                    raise ValueError(f"礼物“{gift_name}”的数值/倍数必须大于 0")
+                if operation in {"multiply", "divide"} and value <= 1:
+                    raise ValueError(f"礼物“{gift_name}”的乘除倍数必须大于 1")
+            item = {"gift_name": gift_name, "operation": operation, "value": value}
+            if isinstance(name_widget, GiftNameCombo):
+                gift_id = name_widget.selected_gift_id()
+                if gift_id:
+                    item["gift_id"] = gift_id
+            result.append(item)
         return result
 
 
@@ -393,18 +624,40 @@ class SettingsWindow(QMainWindow):
     stats_reset_position_requested = pyqtSignal()
     stats_reset_scale_requested = pyqtSignal()
     close_game_requested = pyqtSignal()
+    license_activation_requested = pyqtSignal()
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, data_dir: Optional[Path] = None) -> None:
         super().__init__()
         self._game_running = False
         self._log_count = 0
         self._sound_preview_player: Optional[GameSoundPlayer] = None
+        self._food_sound_map: Dict[str, str] = {}
+        self._gift_catalog: List[Dict] = load_cached_gifts()
+        self._gift_catalog_thread: Optional[GiftCatalogSyncThread] = None
+        self._gift_sync_room = ""
+        self._license_valid = False
+        self._license_plan_label = ""
+        self._license_expires_at = 0
         self._config = normalize_config(config)
-        self.setWindowTitle("萝卜弹幕吃吃吃 · 直播控制台")
+        self._data_dir = Path(data_dir or Path.cwd()).resolve()
+        self._custom_templates: List[Dict] = list(
+            self._config.get("custom_templates", [])
+        )
+        self._gift_rule_templates: List[Dict] = list(
+            self._config.get("gift_rule_templates", [])
+        )
+        self._active_theme_id = str(self._config.get("active_theme_id", ""))
+        self.setWindowTitle("小萝卜吃吃吃 · 直播控制台")
         self.resize(1240, 820)
         self.setMinimumSize(1060, 680)
         self._build_ui()
         self.set_config(self._config)
+        self.license_countdown_timer = QTimer(self)
+        self.license_countdown_timer.setInterval(1000)
+        self.license_countdown_timer.timeout.connect(self._update_license_countdown)
+        self.license_countdown_timer.start()
+        # 设置页打开后自动同步当前房间；已缓存列表会先立即显示，无需等网络。
+        QTimer.singleShot(450, self._auto_sync_gifts)
 
     def _build_ui(self) -> None:
         page = QWidget()
@@ -419,7 +672,7 @@ class SettingsWindow(QMainWindow):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(32, 20, 30, 20)
         header_layout.setSpacing(18)
-        title = QLabel("萝卜弹幕吃吃吃")
+        title = QLabel("小萝卜吃吃吃")
         title.setObjectName("title")
         subtitle = QLabel("直播控制台")
         subtitle.setObjectName("headerSubtitle")
@@ -477,7 +730,36 @@ class SettingsWindow(QMainWindow):
             self.nav_buttons.append(button)
             sidebar_layout.addWidget(button)
         sidebar_layout.addStretch()
-        version = QLabel("萝卜弹幕吃吃吃  ·  控制台")
+
+        license_card = QFrame()
+        license_card.setObjectName("licenseCard")
+        license_layout = QVBoxLayout(license_card)
+        license_layout.setContentsMargins(12, 10, 12, 10)
+        license_layout.setSpacing(4)
+        license_header = QHBoxLayout()
+        license_title = QLabel("授权剩余")
+        license_title.setObjectName("licenseTitle")
+        self.license_activate_button = QPushButton("重新激活")
+        self.license_activate_button.setObjectName("licenseActivateButton")
+        self.license_activate_button.setFixedHeight(28)
+        self.license_activate_button.clicked.connect(
+            lambda: self.license_activation_requested.emit()
+        )
+        license_header.addWidget(license_title)
+        license_header.addStretch(1)
+        license_header.addWidget(self.license_activate_button)
+        self.license_countdown_label = QLabel("正在读取…")
+        self.license_countdown_label.setObjectName("licenseCountdown")
+        self.license_countdown_label.setWordWrap(True)
+        self.license_expiry_label = QLabel("")
+        self.license_expiry_label.setObjectName("licenseExpiry")
+        self.license_expiry_label.setWordWrap(True)
+        license_layout.addLayout(license_header)
+        license_layout.addWidget(self.license_countdown_label)
+        license_layout.addWidget(self.license_expiry_label)
+        sidebar_layout.addWidget(license_card)
+
+        version = QLabel("小萝卜吃吃吃  ·  v2.0.0")
         version.setObjectName("sidebarVersion")
         version.setAlignment(Qt.AlignCenter)
         sidebar_layout.addWidget(version)
@@ -490,6 +772,7 @@ class SettingsWindow(QMainWindow):
                 "显示设置",
                 "管理贴图、尺寸、圆形拾取和游戏显示效果",
                 [
+                    self._build_template_group(),
                     self._build_asset_group(),
                     self._build_gameplay_group(),
                     self._build_sound_group(),
@@ -536,6 +819,20 @@ class SettingsWindow(QMainWindow):
                 border-left: 4px solid #ff5a2f;
             }
             QLabel#sidebarVersion { color: #b5b0aa; font-size: 12px; }
+            QFrame#licenseCard {
+                background: #fff8f3; border: 1px solid #f3d9cc; border-radius: 11px;
+            }
+            QLabel#licenseTitle { color: #7c716b; font-size: 12px; font-weight: 700; }
+            QLabel#licenseCountdown { color: #e95029; font-size: 15px; font-weight: 850; }
+            QLabel#licenseExpiry { color: #9a918b; font-size: 11px; }
+            QPushButton#licenseActivateButton {
+                min-width: 62px; max-width: 74px; padding: 3px 7px;
+                border-radius: 7px; font-size: 12px; color: #e95029;
+                background: #ffffff; border: 1px solid #f0b9a6;
+            }
+            QPushButton#licenseActivateButton:hover {
+                background: #ffede5; border-color: #ff7953;
+            }
             QLabel#pageTitle { font-size: 25px; font-weight: 800; color: #1f1f1f; }
             QLabel#pageSubtitle { font-size: 14px; color: #85817d; }
             QFrame#dashboardCard {
@@ -678,6 +975,23 @@ class SettingsWindow(QMainWindow):
         controls.addWidget(self.range_control_button, 1)
         game_layout.addLayout(controls)
 
+        quick_toggles = QHBoxLayout()
+        quick_toggles.setSpacing(10)
+        self.sound_checkbox = QPushButton("游戏音效：开")
+        self.sound_checkbox.setObjectName("toggleButton")
+        self.sound_checkbox.setCheckable(True)
+        self.sound_checkbox.setChecked(True)
+        self.sound_checkbox.toggled.connect(self._sound_toggle_changed)
+        self.gift_effect_toggle = QPushButton("礼物浮窗：开")
+        self.gift_effect_toggle.setObjectName("toggleButton")
+        self.gift_effect_toggle.setCheckable(True)
+        self.gift_effect_toggle.setChecked(True)
+        self.gift_effect_toggle.toggled.connect(self._gift_effect_toggle_changed)
+        quick_toggles.addWidget(self.sound_checkbox)
+        quick_toggles.addWidget(self.gift_effect_toggle)
+        quick_toggles.addStretch(1)
+        game_layout.addLayout(quick_toggles)
+
         display_card = QFrame()
         display_card.setObjectName("dashboardCard")
         display_layout = QVBoxLayout(display_card)
@@ -745,6 +1059,7 @@ class SettingsWindow(QMainWindow):
         layout = QFormLayout(group)
         self.room_id_edit = QLineEdit()
         self.room_id_edit.setPlaceholderText("例如：21449083（直播间网址末尾数字）")
+        self.room_id_edit.editingFinished.connect(self._auto_sync_gifts)
         self.sessdata_edit = QLineEdit()
         self.sessdata_edit.setEchoMode(QLineEdit.Password)
         self.sessdata_edit.setPlaceholderText("可留空；只粘贴 SESSDATA 的值")
@@ -805,6 +1120,232 @@ class SettingsWindow(QMainWindow):
         layout.setColumnStretch(1, 1)
         return group
 
+    def _build_template_group(self) -> QGroupBox:
+        """主题模板：内置主题一键替换贴图，也允许保存用户自己的组合。"""
+        group = QGroupBox("主题模板")
+        layout = QVBoxLayout(group)
+        intro = QLabel(
+            "双击模板即可自动替换食物和食用者贴图；内置素材会复制到程序目录，重启后仍可使用。"
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#777771;")
+        layout.addWidget(intro)
+
+        self.template_list = QListWidget()
+        self.template_list.setObjectName("templateList")
+        self.template_list.setViewMode(QListView.IconMode)
+        self.template_list.setFlow(QListView.LeftToRight)
+        self.template_list.setWrapping(False)
+        self.template_list.setMovement(QListView.Static)
+        self.template_list.setResizeMode(QListView.Adjust)
+        self.template_list.setIconSize(QSize(72, 72))
+        self.template_list.setGridSize(QSize(164, 116))
+        self.template_list.setMinimumHeight(132)
+        self.template_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.template_list.itemDoubleClicked.connect(
+            lambda _item: self._apply_selected_template()
+        )
+        layout.addWidget(self.template_list)
+
+        buttons = QHBoxLayout()
+        apply_button = QPushButton("应用选中模板")
+        apply_button.setObjectName("accentButton")
+        blank_button = QPushButton("新建空白模板")
+        save_button = QPushButton("保存当前为模板")
+        delete_button = QPushButton("删除自定义模板")
+        apply_button.clicked.connect(self._apply_selected_template)
+        blank_button.clicked.connect(self._new_blank_template)
+        save_button.clicked.connect(self._save_current_template)
+        delete_button.clicked.connect(self._delete_selected_template)
+        buttons.addWidget(apply_button)
+        buttons.addWidget(blank_button)
+        buttons.addWidget(save_button)
+        buttons.addWidget(delete_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        self.star_blessings_container = QFrame()
+        blessings_layout = QVBoxLayout(self.star_blessings_container)
+        blessings_layout.setContentsMargins(0, 4, 0, 0)
+        blessings_layout.setSpacing(5)
+        blessing_title = QLabel("星星收藏瓶祝福语（每行一条，投入星星时随机显示）")
+        blessing_title.setStyleSheet("font-weight:700; color:#5d514c;")
+        self.star_blessings_edit = QPlainTextEdit()
+        self.star_blessings_edit.setPlaceholderText("例如：一切尽意,万事从欢")
+        self.star_blessings_edit.setMinimumHeight(86)
+        self.star_blessings_edit.setMaximumHeight(120)
+        blessings_layout.addWidget(blessing_title)
+        blessings_layout.addWidget(self.star_blessings_edit)
+        layout.addWidget(self.star_blessings_container)
+        self._refresh_template_list()
+        self._update_star_blessings_visibility()
+        return group
+
+    def _refresh_template_list(self, select_key: str = "") -> None:
+        if not hasattr(self, "template_list"):
+            return
+        self.template_list.clear()
+        for template in builtin_templates():
+            preview = template.get("consumer_image") or next(
+                iter(template.get("food_images", [])), ""
+            )
+            item = QListWidgetItem(QIcon(load_pixmap(preview)), template["name"])
+            item.setData(
+                Qt.UserRole,
+                {"kind": "builtin", "id": template["id"]},
+            )
+            item.setToolTip(template["description"] + "\n双击立即应用")
+            item.setTextAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+            self.template_list.addItem(item)
+            if select_key == f"builtin:{template['id']}":
+                self.template_list.setCurrentItem(item)
+
+        for index, template in enumerate(self._custom_templates):
+            preview = template.get("consumer_image") or next(
+                iter(template.get("food_images", [])), ""
+            )
+            item = QListWidgetItem(
+                QIcon(load_pixmap(preview)), f"自定义 · {template['name']}"
+            )
+            item.setData(Qt.UserRole, {"kind": "custom", "index": index})
+            item.setToolTip("你保存的食物与食用者组合\n双击立即应用")
+            item.setTextAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+            self.template_list.addItem(item)
+            if select_key == f"custom:{index}":
+                self.template_list.setCurrentItem(item)
+
+        if self.template_list.count() and self.template_list.currentRow() < 0:
+            self.template_list.setCurrentRow(0)
+
+    def _selected_template(self) -> Optional[Dict]:
+        item = self.template_list.currentItem()
+        payload = item.data(Qt.UserRole) if item else None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("kind") == "builtin":
+            template_id = str(payload.get("id", ""))
+            return materialize_builtin_template(template_id, self._data_dir)
+        if payload.get("kind") == "custom":
+            index = int(payload.get("index", -1))
+            if 0 <= index < len(self._custom_templates):
+                return dict(self._custom_templates[index])
+        return None
+
+    def _apply_selected_template(self) -> None:
+        template = self._selected_template()
+        if template is None:
+            QMessageBox.information(self, "请选择模板", "请先选择一个要应用的主题模板。")
+            return
+        food_images = [
+            str(path)
+            for path in template.get("food_images", [])
+            if Path(str(path)).is_file()
+        ]
+        consumer_image = str(template.get("consumer_image", ""))
+        if consumer_image and not Path(consumer_image).is_file():
+            consumer_image = ""
+        missing_count = len(template.get("food_images", [])) - len(food_images)
+        if template.get("consumer_image") and not consumer_image:
+            missing_count += 1
+        self._replace_asset_paths(food_images, consumer_image)
+        self._active_theme_id = str(
+            template.get("id", "") or template.get("theme_id", "")
+        )
+        self._update_star_blessings_visibility()
+        if missing_count:
+            QMessageBox.warning(
+                self,
+                "部分素材已丢失",
+                f"模板中有 {missing_count} 个素材文件不存在，已应用其余可用素材。",
+            )
+
+    def _replace_asset_paths(self, food_images: List[str], consumer_image: str) -> None:
+        self.food_list.clear()
+        for path in food_images:
+            self._add_food_path(path)
+        if self.food_list.count():
+            self.food_list.setCurrentRow(0)
+        else:
+            self.food_preview.show_path("")
+        self.consumer_edit.setText(consumer_image)
+        self.consumer_preview.show_path(consumer_image)
+        self._refresh_food_sound_choices()
+
+    def _new_blank_template(self) -> None:
+        """清空当前贴图，用户随后可添加素材并保存为自定义模板。"""
+        self._replace_asset_paths([], "")
+        self._active_theme_id = ""
+        self._update_star_blessings_visibility()
+        self.template_list.clearSelection()
+        self.template_list.setCurrentRow(-1)
+
+    def _update_star_blessings_visibility(self) -> None:
+        """祝福语只属于星星收藏瓶，其他主题不占用设置页空间。"""
+        if hasattr(self, "star_blessings_container"):
+            self.star_blessings_container.setVisible(
+                self._active_theme_id == "stars_jar"
+            )
+
+    def _mark_theme_as_customized(self) -> None:
+        """手动更换贴图后不再视为正在使用完整的内置瓶子主题。"""
+        if self._active_theme_id:
+            self._active_theme_id = ""
+            self._update_star_blessings_visibility()
+
+    def _save_current_template(self) -> None:
+        name, accepted = QInputDialog.getText(
+            self,
+            "保存自定义模板",
+            "模板名称：",
+            QLineEdit.Normal,
+        )
+        name = name.strip()[:40]
+        if not accepted:
+            return
+        if not name:
+            QMessageBox.warning(self, "名称不能为空", "请输入一个模板名称。")
+            return
+        template = {
+            "name": name,
+            "food_images": [
+                self._food_path(self.food_list.item(index))
+                for index in range(self.food_list.count())
+            ],
+            "consumer_image": self.consumer_edit.text().strip(),
+            "theme_id": self._active_theme_id,
+        }
+        existing_index = next(
+            (
+                index
+                for index, item in enumerate(self._custom_templates)
+                if item.get("name") == name
+            ),
+            -1,
+        )
+        if existing_index >= 0:
+            self._custom_templates[existing_index] = template
+            selected_key = f"custom:{existing_index}"
+        else:
+            self._custom_templates.append(template)
+            selected_key = f"custom:{len(self._custom_templates) - 1}"
+        self._refresh_template_list(selected_key)
+        QMessageBox.information(
+            self,
+            "模板已保存",
+            "自定义模板已加入列表；点击右上角“保存并应用”或“保存并圈选区域”后会写入配置文件。",
+        )
+
+    def _delete_selected_template(self) -> None:
+        item = self.template_list.currentItem()
+        payload = item.data(Qt.UserRole) if item else None
+        if not isinstance(payload, dict) or payload.get("kind") != "custom":
+            QMessageBox.information(self, "无法删除", "内置模板不会被删除，请选择一个自定义模板。")
+            return
+        index = int(payload.get("index", -1))
+        if 0 <= index < len(self._custom_templates):
+            self._custom_templates.pop(index)
+            self._refresh_template_list()
+
     def _build_gameplay_group(self) -> QGroupBox:
         group = QGroupBox("游戏与范围拾取")
         layout = QGridLayout(group)
@@ -813,15 +1354,14 @@ class SettingsWindow(QMainWindow):
         self.manual_step_spin.valueChanged.connect(self._update_manual_button_text)
         self.food_size_spin = self._spin(24, 256, " px")
         self.consumer_size_spin = self._spin(60, 600, " px")
-        self.food_order_combo = QComboBox()
+        self.food_order_combo = NoWheelComboBox()
         self.food_order_combo.addItem("随机选择贴图", "random")
         self.food_order_combo.addItem("按列表顺序循环", "sequential")
-        self.range_hit_combo = QComboBox()
+        self.range_hit_combo = NoWheelComboBox()
         self.range_hit_combo.addItem("食物碰到圆形范围就选中", "intersects")
         self.range_hit_combo.addItem("食物完整位于圆内才选中", "contains")
         self.range_radius_spin = self._spin(25, 1000, " px")
         self.range_pickup_limit_spin = self._spin(1, 10000, " 个")
-        self.sound_checkbox = QCheckBox("启用轻量提示音")
 
         pairs = [
             ("初始食物数量", self.initial_count_spin),
@@ -837,27 +1377,25 @@ class SettingsWindow(QMainWindow):
             row, column = divmod(index, 2)
             layout.addWidget(QLabel(label), row, column * 2)
             layout.addWidget(widget, row, column * 2 + 1)
-        layout.addWidget(QLabel("游戏音效"), 4, 0)
-        layout.addWidget(self.sound_checkbox, 4, 1)
         scale_note = QLabel(
             "食物会从底部开始逐层自然堆高，数量足够时可堆满整个游戏区域；不会散布悬浮。"
         )
         scale_note.setWordWrap(True)
         scale_note.setStyleSheet("color: #27866a; font-weight: 600;")
-        layout.addWidget(scale_note, 5, 0, 1, 4)
+        layout.addWidget(scale_note, 4, 0, 1, 4)
         note = QLabel(
             "范围模式中：按住食物或从空白处拉出圆形范围；命中数量超过上限时，优先抓取离圆心最近的食物。"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #777771;")
-        layout.addWidget(note, 6, 0, 1, 4)
-        layout.addWidget(RangePickupDemo(group), 7, 0, 1, 4)
+        layout.addWidget(note, 5, 0, 1, 4)
+        layout.addWidget(RangePickupDemo(group), 6, 0, 1, 4)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
         return group
 
     def _build_sound_group(self) -> QGroupBox:
-        """四类游戏事件可分别换成本地音频，并可在保存前试听。"""
+        """全局事件音效和每张食物贴图的独立吃掉音效。"""
         group = QGroupBox("音效设置与试听")
         layout = QGridLayout(group)
         self.sound_path_edits: Dict[str, QLineEdit] = {}
@@ -889,6 +1427,37 @@ class SettingsWindow(QMainWindow):
         note.setWordWrap(True)
         note.setStyleSheet("color:#777771;")
         layout.addWidget(note, len(SOUND_EVENTS), 0, 1, 5)
+
+        food_title_row = len(SOUND_EVENTS) + 1
+        food_title = QLabel("不同食物的吃掉音效")
+        food_title.setStyleSheet("font-size:17px; font-weight:800; margin-top:10px;")
+        layout.addWidget(food_title, food_title_row, 0, 1, 5)
+        self.food_sound_food_combo = NoWheelComboBox()
+        self.food_sound_food_combo.setIconSize(QSize(34, 34))
+        self.food_sound_food_combo.currentIndexChanged.connect(
+            self._food_sound_selection_changed
+        )
+        self.food_sound_path_edit = QLineEdit()
+        self.food_sound_path_edit.setReadOnly(True)
+        self.food_sound_path_edit.setPlaceholderText("未单独设置，将使用上方“吃掉食物”音效")
+        choose_food_sound = QPushButton("单独设置")
+        clear_food_sound = QPushButton("清除单独设置")
+        preview_food_sound = QPushButton("试听")
+        choose_food_sound.clicked.connect(self._choose_food_specific_sound)
+        clear_food_sound.clicked.connect(self._clear_food_specific_sound)
+        preview_food_sound.clicked.connect(self._preview_food_specific_sound)
+        layout.addWidget(QLabel("选择食物"), food_title_row + 1, 0)
+        layout.addWidget(self.food_sound_food_combo, food_title_row + 1, 1)
+        layout.addWidget(self.food_sound_path_edit, food_title_row + 2, 1)
+        layout.addWidget(choose_food_sound, food_title_row + 2, 2)
+        layout.addWidget(clear_food_sound, food_title_row + 2, 3)
+        layout.addWidget(preview_food_sound, food_title_row + 2, 4)
+        set_all_food_sounds = QPushButton("一键给所有食物设置")
+        clear_all_food_sounds = QPushButton("清除全部单独音效")
+        set_all_food_sounds.clicked.connect(self._set_all_food_sounds)
+        clear_all_food_sounds.clicked.connect(self._clear_all_food_sounds)
+        layout.addWidget(set_all_food_sounds, food_title_row + 3, 1, 1, 2)
+        layout.addWidget(clear_all_food_sounds, food_title_row + 3, 3, 1, 2)
         layout.setColumnStretch(1, 1)
         return group
 
@@ -917,15 +1486,84 @@ class SettingsWindow(QMainWindow):
         )
         self._sound_preview_player.play(event_name)
 
+    def _food_sound_keys(self) -> List[str]:
+        keys = [
+            self._food_path(self.food_list.item(index))
+            for index in range(self.food_list.count())
+        ]
+        return keys or ["__default__"]
+
+    def _refresh_food_sound_choices(self) -> None:
+        if not hasattr(self, "food_sound_food_combo"):
+            return
+        current = self.food_sound_food_combo.currentData()
+        self.food_sound_food_combo.blockSignals(True)
+        self.food_sound_food_combo.clear()
+        keys = self._food_sound_keys()
+        for key in keys:
+            if key == "__default__":
+                self.food_sound_food_combo.addItem("默认胡萝卜", key)
+            else:
+                pixmap = load_pixmap(key)
+                self.food_sound_food_combo.addItem(QIcon(pixmap), Path(key).name, key)
+                index = self.food_sound_food_combo.count() - 1
+                self.food_sound_food_combo.setItemData(index, key, Qt.ToolTipRole)
+        selected = self.food_sound_food_combo.findData(current)
+        self.food_sound_food_combo.setCurrentIndex(max(0, selected))
+        self.food_sound_food_combo.blockSignals(False)
+        self._food_sound_selection_changed()
+
+    def _food_sound_selection_changed(self, _index: int = -1) -> None:
+        key = self.food_sound_food_combo.currentData()
+        self.food_sound_path_edit.setText(self._food_sound_map.get(str(key), ""))
+
+    def _choose_food_specific_sound(self) -> None:
+        key = str(self.food_sound_food_combo.currentData() or "")
+        if not key:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "选择该食物的吃掉音效", "", AUDIO_FILTER)
+        if path:
+            self._food_sound_map[key] = path
+            self.food_sound_path_edit.setText(path)
+
+    def _clear_food_specific_sound(self) -> None:
+        key = str(self.food_sound_food_combo.currentData() or "")
+        self._food_sound_map.pop(key, None)
+        self.food_sound_path_edit.clear()
+
+    def _set_all_food_sounds(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "选择所有食物共用的吃掉音效", "", AUDIO_FILTER)
+        if not path:
+            return
+        for key in self._food_sound_keys():
+            self._food_sound_map[key] = path
+        self._food_sound_selection_changed()
+
+    def _clear_all_food_sounds(self) -> None:
+        self._food_sound_map.clear()
+        self.food_sound_path_edit.clear()
+
+    def _preview_food_specific_sound(self) -> None:
+        key = str(self.food_sound_food_combo.currentData() or "")
+        if self._sound_preview_player is not None:
+            self._sound_preview_player.stop()
+            self._sound_preview_player.deleteLater()
+        self._sound_preview_player = GameSoundPlayer(
+            True, self, self._sound_files_from_ui()
+        )
+        self._sound_preview_player.play_file(
+            self._food_sound_map.get(key, ""), "eat"
+        )
+
     def _build_danmaku_group(self) -> QGroupBox:
         group = QGroupBox("弹幕规则")
         layout = QVBoxLayout(group)
         options = QHBoxLayout()
-        self.match_mode_combo = QComboBox()
+        self.match_mode_combo = NoWheelComboBox()
         self.match_mode_combo.addItem("整条弹幕完全匹配", "exact")
         self.match_mode_combo.addItem("弹幕中包含触发词", "contains")
         self.case_checkbox = QCheckBox("区分大小写")
-        self.cooldown_spin = QDoubleSpinBox()
+        self.cooldown_spin = NoWheelDoubleSpinBox()
         self.cooldown_spin.setRange(0, 3600)
         self.cooldown_spin.setDecimals(1)
         self.cooldown_spin.setSuffix(" 秒")
@@ -944,19 +1582,293 @@ class SettingsWindow(QMainWindow):
     def _build_gift_group(self) -> QGroupBox:
         group = QGroupBox("礼物规则")
         layout = QVBoxLayout(group)
+        sync_row = QHBoxLayout()
+        self.sync_gifts_button = QPushButton("同步B站礼物")
+        self.sync_gifts_button.setObjectName("accentButton")
+        self.sync_gifts_button.clicked.connect(self._manual_sync_gifts)
+        self.gift_sync_status = QLabel(
+            f"已读取本地缓存 {len(self._gift_catalog)} 种礼物"
+            if self._gift_catalog
+            else "填写房间号后将自动同步礼物和图片"
+        )
+        self.gift_sync_status.setStyleSheet("color:#77736f;")
+        sync_row.addWidget(self.sync_gifts_button)
+        sync_row.addWidget(self.gift_sync_status, 1)
+        layout.addLayout(sync_row)
+        self.gift_food_table = GiftFoodRuleTable()
+        self.gift_food_table.set_gift_catalog(self._gift_catalog)
+        layout.addWidget(self._build_gift_rule_template_panel())
         operation_note = QLabel(
-            "每种礼物可设置增加、减少、乘以或除以。连送数量会让规则连续执行；"
+            "礼物名称可直接搜索或从带图标的列表选择。每种礼物可设置增加、减少、乘以、除以、"
+            "清空或刮大风。"
+            "连送数量会让规则连续执行；"
             "例如当前 10 个食物，礼物 ×2 连送 3 个，结果为 80。"
         )
         operation_note.setWordWrap(True)
         operation_note.setStyleSheet("color:#7c7773;")
         layout.addWidget(operation_note)
-        self.gift_food_table = GiftFoodRuleTable()
         layout.addWidget(self.gift_food_table)
         layout.addWidget(QLabel("礼物范围拾取：触发后自动开启对应秒数，多次触发会延长时间。"))
-        self.gift_range_table = RuleTable("礼物名称", "开启秒数")
+        self.gift_range_table = RuleTable(
+            "礼物名称", "开启秒数", gift_picker=True
+        )
+        self.gift_range_table.set_gift_catalog(self._gift_catalog)
         layout.addWidget(self.gift_range_table)
         return group
+
+    def _build_gift_rule_template_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("giftTemplatePanel")
+        panel.setStyleSheet(
+            "QFrame#giftTemplatePanel { background:#fff8f3; border:1px solid #ffd8c8;"
+            " border-radius:12px; }"
+        )
+        layout = QGridLayout(panel)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(9)
+
+        title = QLabel("礼物规则模板")
+        title.setStyleSheet("font-size:17px; font-weight:800; color:#e95029;")
+        note = QLabel(
+            "每个模板是一整套玩法，同时保存下方所有礼物运算规则和范围拾取规则。"
+            "应用另一个模板会整套替换当前规则；修改后可另存为任意多个自定义模板。"
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#7c7773;")
+        layout.addWidget(title, 0, 0)
+        layout.addWidget(note, 0, 1, 1, 4)
+
+        self.gift_rule_template_combo = NoWheelComboBox()
+        self.gift_rule_template_combo.setMinimumWidth(280)
+        self.gift_rule_template_combo.currentIndexChanged.connect(
+            self._gift_rule_template_selection_changed
+        )
+        layout.addWidget(QLabel("整套玩法"), 1, 0)
+        layout.addWidget(self.gift_rule_template_combo, 1, 1, 1, 4)
+
+        self.gift_rule_template_summary = QLabel()
+        self.gift_rule_template_summary.setWordWrap(True)
+        self.gift_rule_template_summary.setStyleSheet(
+            "color:#67615d; background:#ffffff; border:1px solid #f0ddd3;"
+            " border-radius:8px; padding:8px 10px;"
+        )
+        layout.addWidget(self.gift_rule_template_summary, 2, 0, 1, 5)
+
+        apply_button = QPushButton("应用整套模板")
+        apply_button.setObjectName("accentButton")
+        blank_button = QPushButton("新建空白模板")
+        save_button = QPushButton("将当前规则另存为模板")
+        delete_button = QPushButton("删除自定义模板")
+        apply_button.clicked.connect(self._apply_gift_rule_template)
+        blank_button.clicked.connect(self._new_blank_gift_rule_template)
+        save_button.clicked.connect(self._save_gift_rule_template)
+        delete_button.clicked.connect(self._delete_gift_rule_template)
+        button_row = QHBoxLayout()
+        button_row.addWidget(apply_button)
+        button_row.addWidget(blank_button)
+        button_row.addWidget(save_button)
+        button_row.addWidget(delete_button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row, 3, 0, 1, 5)
+        layout.setColumnStretch(1, 1)
+        self._refresh_gift_rule_template_combo()
+        return panel
+
+    def _refresh_gift_rule_template_combo(self, select_key: str = "") -> None:
+        if not hasattr(self, "gift_rule_template_combo"):
+            return
+        current = self.gift_rule_template_combo.currentData() or {}
+        old_key = str(current.get("key", "")) if isinstance(current, dict) else ""
+        target_key = select_key or old_key
+        self.gift_rule_template_combo.clear()
+        for template in GIFT_RULE_TEMPLATE_PRESETS:
+            template_id = str(template["id"])
+            payload = {"kind": "builtin", "id": template_id, "key": template_id}
+            self.gift_rule_template_combo.addItem(
+                f"内置 · {template['name']}", payload
+            )
+            index = self.gift_rule_template_combo.count() - 1
+            self.gift_rule_template_combo.setItemData(
+                index, str(template.get("description", "")), Qt.ToolTipRole
+            )
+            if target_key == template_id:
+                self.gift_rule_template_combo.setCurrentIndex(index)
+        for index, template in enumerate(self._gift_rule_templates):
+            key = f"custom:{index}"
+            self.gift_rule_template_combo.addItem(
+                f"自定义 · {template['name']}",
+                {"kind": "custom", "index": index, "key": key},
+            )
+            combo_index = self.gift_rule_template_combo.count() - 1
+            self.gift_rule_template_combo.setItemData(
+                combo_index, "恢复这套模板中保存的全部礼物与范围规则", Qt.ToolTipRole
+            )
+            if target_key == key:
+                self.gift_rule_template_combo.setCurrentIndex(combo_index)
+        self._gift_rule_template_selection_changed()
+
+    def _selected_gift_rule_template(self) -> Optional[Dict]:
+        payload = self.gift_rule_template_combo.currentData() or {}
+        if payload.get("kind") == "custom":
+            index = int(payload.get("index", -1))
+            if 0 <= index < len(self._gift_rule_templates):
+                return self._gift_rule_templates[index]
+        elif payload.get("kind") == "builtin":
+            template_id = str(payload.get("id", ""))
+            return next(
+                (
+                    item
+                    for item in GIFT_RULE_TEMPLATE_PRESETS
+                    if str(item.get("id", "")) == template_id
+                ),
+                None,
+            )
+        return None
+
+    def _gift_rule_template_selection_changed(self, _index: int = -1) -> None:
+        if not hasattr(self, "gift_rule_template_summary"):
+            return
+        template = self._selected_gift_rule_template()
+        if not isinstance(template, dict):
+            self.gift_rule_template_summary.setText("请选择一套礼物规则模板。")
+            return
+        food_count = len(template.get("gift_food_rules", []))
+        range_count = len(template.get("gift_range_rules", []))
+        description = str(template.get("description", "")).strip()
+        prefix = f"包含 {food_count} 条礼物运算、{range_count} 条范围拾取规则"
+        self.gift_rule_template_summary.setText(
+            f"{prefix} · {description}" if description else prefix
+        )
+
+    def _apply_gift_rule_template(self) -> None:
+        template = self._selected_gift_rule_template()
+        if not isinstance(template, dict):
+            return
+        self.gift_food_table.set_rows(template.get("gift_food_rules", []))
+        self.gift_range_table.set_rows(
+            template.get("gift_range_rules", []), "gift_name", "seconds"
+        )
+        self.gift_rule_template_summary.setText(
+            "整套规则已载入下方表格；可继续逐条修改，完成后点击右上角“保存并应用”。"
+        )
+
+    def _new_blank_gift_rule_template(self) -> None:
+        self.gift_food_table.set_rows([])
+        self.gift_range_table.set_rows([], "gift_name", "seconds")
+
+    def _save_gift_rule_template(self) -> None:
+        try:
+            food_rules = self.gift_food_table.get_rows()
+            range_rules = self.gift_range_table.get_rows("gift_name", "seconds")
+        except ValueError as error:
+            QMessageBox.warning(self, "规则有误", str(error))
+            return
+        name, accepted = QInputDialog.getText(
+            self, "保存整套礼物规则", "新模板名称：", QLineEdit.Normal
+        )
+        name = name.strip()[:40]
+        if not accepted:
+            return
+        if not name:
+            QMessageBox.warning(self, "名称不能为空", "请输入一个模板名称。")
+            return
+        template = {
+            "name": name,
+            "gift_food_rules": food_rules,
+            "gift_range_rules": range_rules,
+        }
+        existing_index = next(
+            (
+                index
+                for index, item in enumerate(self._gift_rule_templates)
+                if item.get("name") == name
+            ),
+            -1,
+        )
+        if existing_index >= 0:
+            self._gift_rule_templates[existing_index] = template
+            select_key = f"custom:{existing_index}"
+        else:
+            self._gift_rule_templates.append(template)
+            select_key = f"custom:{len(self._gift_rule_templates) - 1}"
+        self._refresh_gift_rule_template_combo(select_key)
+
+    def _delete_gift_rule_template(self) -> None:
+        payload = self.gift_rule_template_combo.currentData() or {}
+        if payload.get("kind") != "custom":
+            QMessageBox.information(self, "无法删除", "内置礼物模板不会被删除。")
+            return
+        index = int(payload.get("index", -1))
+        if 0 <= index < len(self._gift_rule_templates):
+            self._gift_rule_templates.pop(index)
+            self._refresh_gift_rule_template_combo()
+
+    def _gift_effect_toggle_changed(self, visible: bool) -> None:
+        self.gift_effect_toggle.setText(
+            "礼物浮窗：开" if visible else "礼物浮窗：关"
+        )
+
+    def _sound_toggle_changed(self, enabled: bool) -> None:
+        self.sound_checkbox.setText(
+            "游戏音效：开" if enabled else "游戏音效：关"
+        )
+
+    def _manual_sync_gifts(self) -> None:
+        self._start_gift_sync(force=True)
+
+    def _auto_sync_gifts(self) -> None:
+        self._start_gift_sync(force=False)
+
+    def _start_gift_sync(self, force: bool) -> None:
+        room_id = self.room_id_edit.text().strip()
+        if not room_id or not room_id.isdigit() or int(room_id) <= 0:
+            if force:
+                self.gift_sync_status.setText("请先填写正确的直播间房间号")
+                self.gift_sync_status.setStyleSheet("color:#c34b39;")
+            return
+        if self._gift_catalog_thread is not None and self._gift_catalog_thread.isRunning():
+            return
+        if not force and room_id == self._gift_sync_room:
+            return
+        self._gift_sync_room = room_id
+        self.sync_gifts_button.setEnabled(False)
+        self.gift_sync_status.setStyleSheet("color:#77736f;")
+        self.gift_sync_status.setText("正在获取直播间礼物列表…")
+        thread = GiftCatalogSyncThread(room_id, self)
+        self._gift_catalog_thread = thread
+        thread.progress.connect(self._gift_sync_progress)
+        thread.catalog_ready.connect(self._gift_sync_ready)
+        thread.failed.connect(self._gift_sync_failed)
+        thread.finished.connect(self._gift_sync_finished)
+        thread.start()
+
+    def _gift_sync_progress(self, completed: int, total: int, message: str) -> None:
+        self.gift_sync_status.setText(str(message))
+
+    def _gift_sync_ready(self, gifts: List[Dict]) -> None:
+        self._gift_catalog = list(gifts)
+        self.gift_food_table.set_gift_catalog(self._gift_catalog)
+        self.gift_range_table.set_gift_catalog(self._gift_catalog)
+        with_icon = sum(bool(item.get("icon_path")) for item in gifts)
+        self.gift_sync_status.setStyleSheet("color:#21863a; font-weight:650;")
+        self.gift_sync_status.setText(
+            f"同步完成：{len(gifts)} 种礼物，已缓存 {with_icon} 张图片"
+        )
+
+    def _gift_sync_failed(self, message: str) -> None:
+        self._gift_sync_room = ""
+        cached = len(self._gift_catalog)
+        suffix = f"，继续使用本地缓存 {cached} 种" if cached else ""
+        self.gift_sync_status.setStyleSheet("color:#c34b39;")
+        self.gift_sync_status.setText(f"同步失败：{message}{suffix}")
+
+    def _gift_sync_finished(self) -> None:
+        self.sync_gifts_button.setEnabled(True)
+        thread = self._gift_catalog_thread
+        self._gift_catalog_thread = None
+        if thread is not None:
+            thread.deleteLater()
 
     @staticmethod
     def _spin(minimum: int, maximum: int, suffix: str = "") -> QSpinBox:
@@ -1009,6 +1921,58 @@ class SettingsWindow(QMainWindow):
             "padding:9px 15px; font-weight:700;"
         )
 
+    def set_license_status(self, status) -> None:
+        """更新左下角授权信息；倒计时由本窗口每秒自行刷新。"""
+        self._license_valid = bool(getattr(status, "valid", False))
+        self._license_plan_label = str(getattr(status, "plan_label", "") or "")
+        self._license_expires_at = int(getattr(status, "expires_at", 0) or 0)
+        self._license_message = str(getattr(status, "message", "") or "")
+        self._update_license_countdown()
+
+    def _update_license_countdown(self) -> None:
+        if not hasattr(self, "license_countdown_label"):
+            return
+        if self._license_valid and self._license_expires_at <= 0:
+            self.license_countdown_label.setText("永久授权")
+            self.license_countdown_label.setStyleSheet(
+                "color:#21863a; font-size:15px; font-weight:850;"
+            )
+            self.license_expiry_label.setText("无需续期")
+            self.license_activate_button.setText("重新激活")
+            return
+
+        remaining = self._license_expires_at - int(time.time())
+        if self._license_valid and remaining > 0:
+            days, remainder = divmod(remaining, 86400)
+            hours, remainder = divmod(remainder, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            if days:
+                countdown = f"{days}天 {hours:02d}:{minutes:02d}:{seconds:02d}"
+            else:
+                countdown = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            self.license_countdown_label.setText(countdown)
+            self.license_countdown_label.setStyleSheet(
+                "color:#e95029; font-size:15px; font-weight:850;"
+            )
+            expiry_text = time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.localtime(self._license_expires_at),
+            )
+            plan = f"{self._license_plan_label} · " if self._license_plan_label else ""
+            self.license_expiry_label.setText(f"{plan}到期 {expiry_text}")
+            self.license_activate_button.setText("重新激活")
+            return
+
+        self.license_countdown_label.setText("授权已到期" if self._license_expires_at else "尚未激活")
+        self.license_countdown_label.setStyleSheet(
+            "color:#c43f43; font-size:15px; font-weight:850;"
+        )
+        self.license_expiry_label.setText(
+            getattr(self, "_license_message", "请粘贴新的授权密钥")
+            or "请粘贴新的授权密钥"
+        )
+        self.license_activate_button.setText("立即激活")
+
     def set_game_counts(self, eaten: int, remaining: int) -> None:
         self.dashboard_remaining_label.setText(str(int(remaining)))
 
@@ -1024,6 +1988,8 @@ class SettingsWindow(QMainWindow):
 
     def update_stats_preferences(self, preferences: dict) -> None:
         self._config.update(preferences)
+        if "stats_visible" not in preferences:
+            return
         visible = bool(preferences.get("stats_visible", True))
         self.stats_toggle_button.blockSignals(True)
         self.stats_toggle_button.setChecked(visible)
@@ -1078,6 +2044,15 @@ class SettingsWindow(QMainWindow):
     def set_config(self, config: dict) -> None:
         config = normalize_config(config)
         self._config = dict(config)
+        self._custom_templates = list(config.get("custom_templates", []))
+        self._refresh_template_list()
+        self._active_theme_id = str(config.get("active_theme_id", ""))
+        self.star_blessings_edit.setPlainText(
+            "\n".join(config.get("star_blessings", []))
+        )
+        self._update_star_blessings_visibility()
+        self._gift_rule_templates = list(config.get("gift_rule_templates", []))
+        self._refresh_gift_rule_template_combo()
         self.room_id_edit.setText(config["room_id"])
         self.sessdata_edit.setText(config["sessdata"])
         self.food_list.clear()
@@ -1098,6 +2073,8 @@ class SettingsWindow(QMainWindow):
             self.sound_path_edits[event_name].setText(
                 config.get("sound_files", {}).get(event_name, "")
             )
+        self._food_sound_map = dict(config.get("food_sound_files", {}))
+        self._refresh_food_sound_choices()
         self._set_combo(self.food_order_combo, config["food_image_order"])
         self._set_combo(self.range_hit_combo, config["range_hit_mode"])
         self.range_radius_spin.setValue(config["range_radius"])
@@ -1108,6 +2085,16 @@ class SettingsWindow(QMainWindow):
         self.danmaku_table.set_rows(config["danmaku_rules"], "keyword", "delta")
         self.gift_food_table.set_rows(config["gift_food_rules"])
         self.gift_range_table.set_rows(config["gift_range_rules"], "gift_name", "seconds")
+        self.gift_effect_toggle.blockSignals(True)
+        self.gift_effect_toggle.setChecked(
+            bool(config.get("gift_effect_overlay_enabled", True))
+        )
+        self.gift_effect_toggle.setText(
+            "礼物浮窗：开"
+            if config.get("gift_effect_overlay_enabled", True)
+            else "礼物浮窗：关"
+        )
+        self.gift_effect_toggle.blockSignals(False)
         self.stats_toggle_button.blockSignals(True)
         self.stats_toggle_button.setChecked(config["stats_visible"])
         self.stats_toggle_button.setText("已显示" if config["stats_visible"] else "已隐藏")
@@ -1129,6 +2116,9 @@ class SettingsWindow(QMainWindow):
             if path not in existing:
                 self._add_food_path(path)
                 existing.add(path)
+        self._refresh_food_sound_choices()
+        if paths:
+            self._mark_theme_as_customized()
         if paths and self.food_list.count():
             last_path = paths[-1]
             for index in range(self.food_list.count()):
@@ -1137,20 +2127,29 @@ class SettingsWindow(QMainWindow):
                     break
 
     def _remove_food_images(self) -> None:
+        removed = bool(self.food_list.selectedItems())
         for item in self.food_list.selectedItems():
+            self._food_sound_map.pop(self._food_path(item), None)
             self.food_list.takeItem(self.food_list.row(item))
         if not self.food_list.count():
             self.food_preview.show_path("")
+        self._refresh_food_sound_choices()
+        if removed:
+            self._mark_theme_as_customized()
 
     def _choose_consumer_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "选择食用者贴图", "", IMAGE_FILTER)
         if path:
             self.consumer_edit.setText(path)
             self.consumer_preview.show_path(path)
+            self._mark_theme_as_customized()
 
     def _clear_consumer_image(self) -> None:
+        had_consumer = bool(self.consumer_edit.text().strip())
         self.consumer_edit.clear()
         self.consumer_preview.show_path("")
+        if had_consumer:
+            self._mark_theme_as_customized()
 
     def _add_food_path(self, path: str) -> None:
         pixmap = load_pixmap(path)
@@ -1176,12 +2175,20 @@ class SettingsWindow(QMainWindow):
                 for i in range(self.food_list.count())
             ],
             "consumer_image": self.consumer_edit.text().strip(),
+            "active_theme_id": self._active_theme_id,
+            "star_blessings": [
+                line.strip()
+                for line in self.star_blessings_edit.toPlainText().splitlines()
+                if line.strip()
+            ],
+            "custom_templates": list(self._custom_templates),
             "initial_food_count": self.initial_count_spin.value(),
             "manual_step": self.manual_step_spin.value(),
             "food_size": self.food_size_spin.value(),
             "consumer_size": self.consumer_size_spin.value(),
             "sound_enabled": self.sound_checkbox.isChecked(),
             "sound_files": self._sound_files_from_ui(),
+            "food_sound_files": dict(self._food_sound_map),
             "food_image_order": self.food_order_combo.currentData(),
             "food_layout_mode": "piles",
             "danmaku_match_mode": self.match_mode_combo.currentData(),
@@ -1189,6 +2196,13 @@ class SettingsWindow(QMainWindow):
             "danmaku_rules": self.danmaku_table.get_rows("keyword", "delta"),
             "gift_food_rules": self.gift_food_table.get_rows(),
             "gift_range_rules": self.gift_range_table.get_rows("gift_name", "seconds"),
+            "gift_rule_templates": list(self._gift_rule_templates),
+            "gift_effect_overlay_enabled": self.gift_effect_toggle.isChecked(),
+            "gift_effect_position_set": self._config.get(
+                "gift_effect_position_set", False
+            ),
+            "gift_effect_x_ratio": self._config.get("gift_effect_x_ratio", 0.5),
+            "gift_effect_y_ratio": self._config.get("gift_effect_y_ratio", 0.03),
             "range_hit_mode": self.range_hit_combo.currentData(),
             "range_radius": self.range_radius_spin.value(),
             "range_pickup_limit": self.range_pickup_limit_spin.value(),
@@ -1217,6 +2231,11 @@ class SettingsWindow(QMainWindow):
         missing.extend(
             path
             for path in config.get("sound_files", {}).values()
+            if path and not Path(path).is_file()
+        )
+        missing.extend(
+            path
+            for path in config.get("food_sound_files", {}).values()
             if path and not Path(path).is_file()
         )
         if missing:

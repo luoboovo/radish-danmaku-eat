@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import html
 import heapq
 import math
 import random
@@ -14,8 +15,10 @@ from typing import Dict, List, Optional
 from PyQt5.QtCore import (
     QEasingCurve,
     QPoint,
+    QPointF,
     QPropertyAnimation,
     QRect,
+    QRectF,
     QSize,
     Qt,
     QTimer,
@@ -48,6 +51,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from .gift_catalog import cached_gift_icon
 from .media import create_movie, load_pixmap as load_media_pixmap, set_label_media
 from .sound import GameSoundPlayer
 
@@ -71,6 +75,7 @@ class FoodItem(QLabel):
     ) -> None:
         super().__init__(game)
         self.game = game
+        self.source_path = str(path) if path else "__default__"
         self.rotation_angle = int(rotation_angle)
         self._shared_movie: Optional[QMovie] = None
         self.setFixedSize(size, size)
@@ -446,6 +451,532 @@ class EatingFeedbackCard(QLabel):
         self.pop_animation.start()
 
 
+class BlessingBubble(QWidget):
+    """许愿瓶祝福气泡：手绘黑边、粉色内芯和向下的小尾巴。"""
+
+    def __init__(self, game: "GameWindow") -> None:
+        super().__init__(game)
+        self.game = game
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.label = QLabel(self)
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setWordWrap(True)
+        self.label.setStyleSheet(
+            f"background:transparent; color:#272126; border:0;"
+            f"font-family:'Microsoft YaHei UI';"
+            f"font-size:{game._scaled_px(19, 15)}px; font-weight:800;"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            game._scaled_px(30, 20),
+            game._scaled_px(20, 14),
+            game._scaled_px(30, 20),
+            game._scaled_px(38, 28),
+        )
+        layout.addWidget(self.label)
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self.hide)
+        self.hide()
+
+    def show_message(self, message: str) -> None:
+        self.label.setMaximumWidth(self.game._scaled_px(420, 260))
+        self.label.setText(str(message))
+        self.label.adjustSize()
+        self.adjustSize()
+        self.setMinimumWidth(self.game._scaled_px(230, 170))
+        self.adjustSize()
+        self.reposition()
+        self.show()
+        self.raise_()
+        self.hide_timer.start(4200)
+
+    def reposition(self) -> None:
+        consumer = self.game.consumer.geometry()
+        x = consumer.center().x() - self.width() // 2
+        y = consumer.top() - self.height() + self.game._scaled_px(18, 10)
+        self.move(
+            max(0, min(self.game.width() - self.width(), x)),
+            max(0, min(self.game.height() - self.height(), y)),
+        )
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        body = self.rect().adjusted(5, 5, -5, -self.game._scaled_px(26, 18))
+        radius = self.game._scaled_px(30, 20)
+        outer = QPainterPath()
+        outer.addRoundedRect(QRectF(body), radius, radius)
+        tail_center = body.center().x()
+        outer.moveTo(tail_center - 15, body.bottom() - 2)
+        outer.cubicTo(
+            tail_center - 4,
+            body.bottom() + 9,
+            tail_center + 5,
+            body.bottom() + 20,
+            tail_center + 18,
+            body.bottom() + 23,
+        )
+        outer.cubicTo(
+            tail_center + 11,
+            body.bottom() + 11,
+            tail_center + 12,
+            body.bottom() + 4,
+            tail_center + 12,
+            body.bottom() - 2,
+        )
+        painter.setPen(QPen(QColor(22, 20, 22), self.game._scaled_px(5, 3)))
+        painter.setBrush(QColor(252, 251, 251, 248))
+        painter.drawPath(outer)
+        inner = body.adjusted(
+            self.game._scaled_px(13, 9),
+            self.game._scaled_px(10, 7),
+            -self.game._scaled_px(13, 9),
+            -self.game._scaled_px(10, 7),
+        )
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(246, 181, 216, 245))
+        painter.drawRoundedRect(inner, radius, radius)
+        painter.end()
+
+
+class GiftEffectRow(QFrame):
+    """礼物作用浮窗中的一行，图标与礼物 ID/名称始终成对更新。"""
+
+    def __init__(self, game: "GameWindow", entry: Dict) -> None:
+        super().__init__()
+        self.gift_id = int(entry.get("gift_id", 0) or 0)
+        self.gift_name = str(entry.get("gift_name", "")).strip()
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        icon_size = game._scaled_px(48, 36)
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(icon_size, icon_size)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.icon_label.setStyleSheet(
+            "background:transparent; border:0;"
+            "font-family:'Segoe UI Emoji'; font-size:25px;"
+        )
+        icon_path = cached_gift_icon(self.gift_name, self.gift_id)
+        if not set_label_media(self.icon_label, icon_path, QSize(icon_size, icon_size)):
+            self.icon_label.setText("🎁")
+
+        self.gift_name_label = QLabel(self.gift_name)
+        self.gift_name_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.gift_name_label.setStyleSheet(
+            f"color:#ffffff; font-family:'Microsoft YaHei UI';"
+            f"font-size:{game._scaled_px(18, 15)}px; font-weight:800;"
+        )
+        self.effect_label = QLabel()
+        self.effect_label.setTextFormat(Qt.RichText)
+        self.effect_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.effect_label.setStyleSheet(
+            f"background:transparent; font-family:'Microsoft YaHei UI';"
+            f"font-size:{game._scaled_px(18, 15)}px; font-weight:800;"
+        )
+        self.effect_label.setText(self._effect_html(str(entry.get("effect_text", ""))))
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(game._scaled_px(10, 7))
+        layout.addWidget(self.icon_label)
+        layout.addWidget(self.gift_name_label)
+        layout.addSpacing(game._scaled_px(6, 4))
+        layout.addWidget(self.effect_label)
+        layout.addStretch(1)
+
+    def show_live_effect(self, gift_num: int, effect_text: str) -> None:
+        quantity = f" ×{int(gift_num)}" if int(gift_num) > 1 else ""
+        self.gift_name_label.setText(f"{self.gift_name}{quantity}")
+        self.effect_label.setText(self._effect_html(str(effect_text)))
+
+    @staticmethod
+    def _effect_html(effect_text: str) -> str:
+        """不同规则使用固定颜色，同一行有多个作用时分别着色。"""
+        rendered = []
+        for part in str(effect_text).split(" · "):
+            clean = part.strip()
+            if clean.startswith(("投喂", "增加")):
+                color = "#ff626b"
+            elif clean.startswith("减少"):
+                color = "#58d68d"
+            elif clean.startswith("范围拾取"):
+                color = "#ffd54f"
+            elif clean.startswith("清空"):
+                color = "#c084fc"
+            elif clean.startswith("刮大风"):
+                color = "#67d5ff"
+            else:
+                color = "#ffb24b"
+            rendered.append(
+                f"<span style='color:{color}; font-weight:800'>{html.escape(clean)}</span>"
+            )
+        separator = " <span style='color:#b8b8b8'>·</span> "
+        return separator.join(rendered)
+
+
+class GiftEffectOverlay(QFrame):
+    """按配置逐条常驻展示礼物作用，并支持鼠标拖放位置。"""
+
+    def __init__(self, game: "GameWindow") -> None:
+        super().__init__(game)
+        self.game = game
+        self.rows: List[GiftEffectRow] = []
+        self._drag_offset: Optional[QPoint] = None
+        self._was_dragged = bool(game.config.get("gift_effect_position_set", False))
+        self._position_restored = False
+        self.setObjectName("giftEffectOverlay")
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setCursor(Qt.SizeAllCursor)
+        self.setToolTip("按住鼠标左键拖动，松开后放置")
+        self.setStyleSheet(
+            "QFrame#giftEffectOverlay {"
+            " background: rgba(28, 29, 33, 226); border: 1px solid rgba(255,255,255,55);"
+            " border-radius: 18px; }"
+        )
+        # 不给整个浮窗套实时阴影。透明窗口中移动带阴影的复杂子控件开销很大，
+        # 也可能在部分显卡上短暂丢失纹理，表现为拖动卡顿或浮窗消失。
+        self.rows_layout = QVBoxLayout(self)
+        self.rows_layout.setContentsMargins(
+            game._scaled_px(13, 10),
+            game._scaled_px(10, 8),
+            game._scaled_px(18, 13),
+            game._scaled_px(10, 8),
+        )
+        self.rows_layout.setSpacing(game._scaled_px(6, 4))
+        self.hide()
+
+    def set_rules(self, entries: List[Dict]) -> None:
+        self.setUpdatesEnabled(False)
+        for row in self.rows:
+            self.rows_layout.removeWidget(row)
+            row.hide()
+            row.deleteLater()
+        self.rows.clear()
+        for entry in entries:
+            row = GiftEffectRow(self.game, entry)
+            self.rows.append(row)
+            self.rows_layout.addWidget(row)
+        if not self.rows:
+            self.setUpdatesEnabled(True)
+            self.hide()
+            return
+        self.setMaximumWidth(max(140, self.game.width() - 24))
+        self.adjustSize()
+        self.reposition()
+        self.setUpdatesEnabled(True)
+        self.show()
+        self.raise_()
+
+    def show_live_effect(self, gift_name: str, gift_num: int, effect_text: str) -> None:
+        target = str(gift_name).strip()
+        for row in self.rows:
+            if row.gift_name == target:
+                row.show_live_effect(gift_num, effect_text)
+                self.adjustSize()
+                self.reposition()
+                self.show()
+                self.raise_()
+                return
+
+    def reposition(self) -> None:
+        if self._was_dragged and not self._position_restored:
+            available_x = max(0, self.game.width() - self.width())
+            available_y = max(0, self.game.height() - self.height())
+            x = round(
+                available_x
+                * float(self.game.config.get("gift_effect_x_ratio", 0.5))
+            )
+            y = round(
+                available_y
+                * float(self.game.config.get("gift_effect_y_ratio", 0.03))
+            )
+            self._position_restored = True
+        elif self._was_dragged:
+            x = max(0, min(self.game.width() - self.width(), self.x()))
+            y = max(0, min(self.game.height() - self.height(), self.y()))
+        else:
+            x = max(8, (self.game.width() - self.width()) // 2)
+            y = max(8, self.game._scaled_px(24, 12))
+        self.move(x, y)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self._drag_offset = event.globalPos() - self.mapToGlobal(QPoint(0, 0))
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        event.ignore()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
+            desired = self.game.mapFromGlobal(event.globalPos() - self._drag_offset)
+            self.move(
+                max(0, min(self.game.width() - self.width(), desired.x())),
+                max(0, min(self.game.height() - self.height(), desired.y())),
+            )
+            self._was_dragged = True
+            self._position_restored = True
+            self.raise_()
+            event.accept()
+            return
+        event.ignore()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self._drag_offset = None
+            self.setCursor(Qt.SizeAllCursor)
+            self.game._gift_effect_preferences_updated()
+            event.accept()
+            return
+        event.ignore()
+
+
+class WindEffectOverlay(QWidget):
+    """透明刮风动画：风线与全部食物一起被卷起，结束后重新落回食物堆。"""
+
+    def __init__(self, game: "GameWindow") -> None:
+        super().__init__(game)
+        self.game = game
+        self._particles: List[Dict[str, float]] = []
+        self._direction = 1
+        self._started_at = 0.0
+        self._last_tick = 0.0
+        self._duration = 1.8
+        self._food_states: Dict[FoodItem, Dict[str, float]] = {}
+        self._pending_food_count: Optional[int] = None
+        self._pending_source = ""
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.hide()
+        self._timer = QTimer(self)
+        self._timer.setInterval(25)
+        self._timer.timeout.connect(self._tick)
+
+    def start_wind(
+        self,
+        quantity: int = 1,
+        final_food_count: Optional[int] = None,
+        source: str = "",
+    ) -> None:
+        self.setGeometry(self.game.rect())
+        self._direction = random.choice((-1, 1))
+        self._duration = min(5.0, 2.6 + max(1, int(quantity)) * 0.28)
+        now = time.monotonic()
+        self._started_at = now
+        self._last_tick = now
+        width = max(1, self.width())
+        height = max(1, self.height())
+        scale = max(0.72, float(self.game._display_scale))
+        self._particles = []
+        for _ in range(max(18, min(42, width // 52))):
+            length = random.uniform(70.0, 230.0) * scale
+            self._particles.append(
+                {
+                    "x": random.uniform(-length, width + length),
+                    "y": random.uniform(8.0, max(9.0, height - 8.0)),
+                    "length": length,
+                    "speed": random.uniform(390.0, 820.0) * scale,
+                    "curve": random.uniform(-18.0, 18.0) * scale,
+                    "width": random.uniform(1.4, 4.2) * scale,
+                    "alpha": random.uniform(0.45, 1.0),
+                }
+            )
+        self.game._cancel_drag()
+        if hasattr(self.game, "physics_timer"):
+            self.game.physics_timer.stop()
+        self._food_states.clear()
+        self._capture_foods()
+        if final_food_count is not None:
+            self._pending_food_count = max(
+                0, min(MAX_FOOD_COUNT, int(final_food_count))
+            )
+            self._pending_source = str(source)
+        food_count = len(self.game.food_items)
+        self._timer.setInterval(16 if food_count <= 300 else 25 if food_count <= 1000 else 33)
+        self.show()
+        self.raise_()
+        self._timer.start()
+        self.update()
+
+    @property
+    def active(self) -> bool:
+        return self._timer.isActive()
+
+    @property
+    def pending_food_count(self) -> Optional[int]:
+        return self._pending_food_count
+
+    def adjust_pending_food_count(self, delta: int) -> None:
+        """刮风期间收到其他投喂时，同步修正动画结束后的最终数量。"""
+        if self._pending_food_count is None:
+            return
+        self._pending_food_count = max(
+            0,
+            min(MAX_FOOD_COUNT, self._pending_food_count + int(delta)),
+        )
+
+    def _capture_foods(self) -> None:
+        """把本次风暴中途新增的食物也立即加入，不留下静止食物。"""
+        current_items = set(self.game.food_items)
+        for item in list(self._food_states):
+            if item not in current_items:
+                self._food_states.pop(item, None)
+        scale = max(0.72, float(self.game._display_scale))
+        for item in self.game.food_items:
+            if item in self._food_states:
+                continue
+            item.physics_x = float(item.x())
+            item.physics_y = float(item.y())
+            item.velocity_x = 0.0
+            item.velocity_y = 0.0
+            item.gravity_target = None
+            item.free_falling = False
+            item.is_sleeping = False
+            self._food_states[item] = {
+                "x": float(item.x()),
+                "y": float(item.y()),
+                "vx": self._direction * random.uniform(330.0, 760.0) * scale,
+                "vy": -random.uniform(430.0, 860.0) * scale,
+                "phase": random.uniform(0.0, math.tau),
+                "frequency": random.uniform(2.2, 5.5),
+            }
+            item.raise_()
+
+    def stop_and_settle(self) -> None:
+        """提前停止风暴时，也让现存食物自然落回各自堆积槽位。"""
+        self._timer.stop()
+        self.hide()
+        self._settle_foods()
+
+    def _settle_foods(self) -> None:
+        pending_count = self._pending_food_count
+        pending_source = self._pending_source
+        self._pending_food_count = None
+        self._pending_source = ""
+        if pending_count is not None and pending_count != self.game.food_count:
+            self.game.change_food_count(
+                pending_count - self.game.food_count,
+                pending_source,
+            )
+        for item in self.game.food_items:
+            item.physics_x = float(item.x())
+            item.physics_y = float(item.y())
+            item.velocity_x = 0.0
+            item.velocity_y = random.uniform(35.0, 100.0)
+            item.gravity_target = None
+            item.free_falling = False
+            item.is_sleeping = False
+        self._food_states.clear()
+        if self.game.food_items:
+            self.game._wake_physics()
+        self.game.consumer.raise_()
+        self.game._raise_gift_effect()
+        if self.game.stats_overlay.isVisible():
+            self.game.stats_overlay.raise_()
+
+    def _tick(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._started_at
+        if elapsed >= self._duration:
+            self._timer.stop()
+            self.hide()
+            self._settle_foods()
+            return
+        dt = min(0.08, max(0.0, now - self._last_tick))
+        self._last_tick = now
+        width = max(1, self.width())
+        height = max(1, self.height())
+        progress = max(0.0, min(1.0, elapsed / self._duration))
+        if hasattr(self.game, "physics_timer"):
+            self.game.physics_timer.stop()
+        self._capture_foods()
+        for particle in self._particles:
+            particle["x"] += self._direction * particle["speed"] * dt
+            length = particle["length"]
+            if self._direction > 0 and particle["x"] - length > width:
+                particle["x"] = -length
+            elif self._direction < 0 and particle["x"] + length < 0:
+                particle["x"] = width + length
+
+        # 前 68% 像阵风一样把全部食物卷起并在画面中循环；最后 32%
+        # 平滑收束到各自落点上方，随后交还给重力系统自然下落。
+        for item, state in list(self._food_states.items()):
+            if item not in self.game.food_items:
+                continue
+            size = item.width()
+            state["vy"] += 250.0 * dt
+            state["x"] += state["vx"] * dt
+            state["y"] += (
+                state["vy"]
+                + math.sin(elapsed * state["frequency"] + state["phase"]) * 145.0
+            ) * dt
+            if state["x"] > width - size * 0.25:
+                state["x"] = -size * 0.65
+            elif state["x"] < -size * 0.75:
+                state["x"] = width - size * 0.35
+            if state["y"] < -size * 0.45:
+                state["y"] = -size * 0.45
+                state["vy"] = random.uniform(55.0, 170.0)
+            elif state["y"] > height - size:
+                state["y"] = float(height - size)
+                state["vy"] = -random.uniform(260.0, 620.0)
+
+            if progress > 0.68:
+                settle_progress = (progress - 0.68) / 0.32
+                easing = 1.0 - (1.0 - settle_progress) ** 2
+                target = self.game._pile_target(item.pile_slot, size)
+                landing_y = max(-size * 0.35, target.y() - max(24, round(size * 0.72)))
+                blend = min(1.0, max(0.08, easing * 0.30))
+                state["x"] += (target.x() - state["x"]) * blend
+                state["y"] += (landing_y - state["y"]) * blend
+
+            item.physics_x = state["x"]
+            item.physics_y = state["y"]
+            item.move(round(state["x"]), round(state["y"]))
+        self.update()
+        self.raise_()
+        self.game._raise_gift_effect()
+        if self.game.stats_overlay.isVisible():
+            self.game.stats_overlay.raise_()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if not self._particles or self._duration <= 0:
+            return
+        progress = max(0.0, min(1.0, (time.monotonic() - self._started_at) / self._duration))
+        fade = math.sin(math.pi * progress)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        for index, particle in enumerate(self._particles):
+            x = particle["x"]
+            y = particle["y"]
+            length = particle["length"] * self._direction
+            curve = particle["curve"]
+            path = QPainterPath(QPointF(x, y))
+            path.cubicTo(
+                QPointF(x - length * 0.35, y + curve),
+                QPointF(x - length * 0.72, y - curve),
+                QPointF(x - length, y),
+            )
+            alpha = int(205 * fade * particle["alpha"])
+            color = QColor(205, 244, 255, max(0, min(255, alpha)))
+            painter.setPen(QPen(color, particle["width"], Qt.SolidLine, Qt.RoundCap))
+            painter.drawPath(path)
+            # 每几条风线补一个短小旋涡，让动画比平移直线更像阵风。
+            if index % 6 == 0:
+                swirl = QPainterPath(QPointF(x - length * 0.42, y))
+                swirl.cubicTo(
+                    QPointF(x - length * 0.50, y - 16),
+                    QPointF(x - length * 0.62, y + 16),
+                    QPointF(x - length * 0.70, y),
+                )
+                painter.drawPath(swirl)
+        painter.end()
+
+
 class GameWindow(QWidget):
     """限制在主播圈选区域内的透明游戏层。"""
 
@@ -532,7 +1063,7 @@ class GameWindow(QWidget):
         elif screen is not None:
             self.setGeometry(screen.geometry())
         self._update_display_scale()
-        self.setWindowTitle("萝卜弹幕吃吃吃 [透明游戏区域]")
+        self.setWindowTitle("小萝卜吃吃吃 [透明游戏区域]")
 
     def _update_display_scale(self) -> None:
         """按圈选区域比例缩放游戏元素；Qt 自身再负责显示器 DPI 换算。"""
@@ -814,11 +1345,19 @@ class GameWindow(QWidget):
 
         self.effect_card = EatingFeedbackCard(self, self._display_scale)
 
+        self.blessing_bubble = BlessingBubble(self)
+
         self.stats_overlay = StatsOverlay(self)
         self.stats_overlay.update_counts(self.eaten_count, self.food_count)
         self.stats_overlay.restore_position_from_config()
         self.stats_overlay.setVisible(bool(self.config.get("stats_visible", True)))
         self.stats_overlay.raise_()
+
+        self.gift_effect_overlay = GiftEffectOverlay(self)
+        self._refresh_gift_rule_overlay()
+
+        self.wind_effect_overlay = WindEffectOverlay(self)
+        self.wind_effect_overlay.setGeometry(self.rect())
 
     def _build_timers(self) -> None:
         self.range_timer = QTimer(self)
@@ -919,6 +1458,7 @@ class GameWindow(QWidget):
         )
         self.stats_overlay.restore_position_from_config()
         self.stats_overlay.setVisible(bool(self.config.get("stats_visible", True)))
+        self._refresh_gift_rule_overlay()
         self._update_count_display()
         self.consumer.raise_()
         if self.stats_overlay.isVisible():
@@ -926,6 +1466,8 @@ class GameWindow(QWidget):
 
     def _rebuild_food_visuals(self) -> None:
         """仅当贴图、尺寸或排列方式变化时重建食物，数量保持不变。"""
+        if hasattr(self, "wind_effect_overlay") and self.wind_effect_overlay.active:
+            self.wind_effect_overlay.stop_and_settle()
         self.physics_timer.stop()
         for item in self.food_items:
             item.release_media()
@@ -953,6 +1495,22 @@ class GameWindow(QWidget):
             "stats_scale": round(self.stats_overlay.scale_factor, 2),
             "stats_x_ratio": max(0.0, min(1.0, self.stats_overlay.x() / available_x)),
             "stats_y_ratio": max(0.0, min(1.0, self.stats_overlay.y() / available_y)),
+        }
+        self.config.update(preferences)
+        self.stats_preferences_changed.emit(preferences)
+
+    def _gift_effect_preferences_updated(self) -> None:
+        """与统计展示框相同：拖动松手后按比例保存位置。"""
+        available_x = max(1, self.width() - self.gift_effect_overlay.width())
+        available_y = max(1, self.height() - self.gift_effect_overlay.height())
+        preferences = {
+            "gift_effect_position_set": True,
+            "gift_effect_x_ratio": max(
+                0.0, min(1.0, self.gift_effect_overlay.x() / available_x)
+            ),
+            "gift_effect_y_ratio": max(
+                0.0, min(1.0, self.gift_effect_overlay.y() / available_y)
+            ),
         }
         self.config.update(preferences)
         self.stats_preferences_changed.emit(preferences)
@@ -1010,6 +1568,87 @@ class GameWindow(QWidget):
         if len(parts) >= 4 and parts[0] == "gift":
             self.sound_player.play("gift")
 
+    def show_gift_effect(self, gift_name: str, gift_num: int, effect_text: str) -> None:
+        """收到礼物后把常驻浮窗更新为这次实际触发的作用。"""
+        if not bool(self.config.get("gift_effect_overlay_enabled", True)):
+            return
+        self.gift_effect_overlay.show_live_effect(gift_name, gift_num, effect_text)
+
+    @staticmethod
+    def _configured_effect_text(operation: str, value: float) -> str:
+        if operation in {"add", "subtract"}:
+            action = "投喂" if operation == "add" else "减少"
+            return f"{action} {int(round(value))} 个"
+        if operation == "clear":
+            return "清空食物"
+        if operation == "wind":
+            return "刮大风 · 随机增减 10%～50%"
+        symbol = "×" if operation == "multiply" else "÷"
+        return f"食物 {symbol}{value:g}"
+
+    def _refresh_gift_rule_overlay(self) -> None:
+        """游戏启动或应用配置后，按设置顺序显示全部礼物规则。"""
+        if not hasattr(self, "gift_effect_overlay"):
+            return
+        if not bool(self.config.get("gift_effect_overlay_enabled", True)):
+            self.gift_effect_overlay.hide()
+            return
+        entries_by_name: Dict[str, Dict] = {}
+        for rule in self.config.get("gift_food_rules", []):
+            gift_name = str(rule.get("gift_name", "")).strip()
+            if not gift_name:
+                continue
+            entry = entries_by_name.setdefault(
+                gift_name,
+                {
+                    "gift_name": gift_name,
+                    "gift_id": int(rule.get("gift_id", 0) or 0),
+                    "effects": [],
+                },
+            )
+            if not entry["gift_id"]:
+                entry["gift_id"] = int(rule.get("gift_id", 0) or 0)
+            entry["effects"].append(
+                self._configured_effect_text(
+                    str(rule.get("operation", "add")),
+                    float(rule.get("value", 1.0)),
+                )
+            )
+        for rule in self.config.get("gift_range_rules", []):
+            gift_name = str(rule.get("gift_name", "")).strip()
+            if not gift_name:
+                continue
+            entry = entries_by_name.setdefault(
+                gift_name,
+                {
+                    "gift_name": gift_name,
+                    "gift_id": int(rule.get("gift_id", 0) or 0),
+                    "effects": [],
+                },
+            )
+            if not entry["gift_id"]:
+                entry["gift_id"] = int(rule.get("gift_id", 0) or 0)
+            entry["effects"].append(
+                f"范围拾取 {int(rule.get('seconds', 1))} 秒"
+            )
+        entries = [
+            {
+                "gift_name": entry["gift_name"],
+                "gift_id": entry["gift_id"],
+                "effect_text": " · ".join(entry["effects"]) or "触发互动",
+            }
+            for entry in entries_by_name.values()
+        ]
+        self.gift_effect_overlay.set_rules(entries)
+
+    def _raise_gift_effect(self) -> None:
+        """物理刷新和拖拽会改变子控件层级，礼物提示必须始终保持最上层。"""
+        if (
+            hasattr(self, "gift_effect_overlay")
+            and self.gift_effect_overlay.isVisible()
+        ):
+            self.gift_effect_overlay.raise_()
+
     def apply_external_delta(self, delta: int, source: str) -> None:
         self.change_food_count(int(delta), source)
 
@@ -1020,11 +1659,14 @@ class GameWindow(QWidget):
         gift_num: int,
         source: str,
     ) -> None:
-        """按礼物数量执行加、减、乘、除运算，并限制异常倍率。"""
+        """按礼物数量执行食物运算；刮风会逐次随机增减 10%～50%。"""
         operation = str(operation)
         value = max(0.01, float(value))
         quantity = max(1, int(gift_num))
-        old_count = self.food_count
+        if operation == "wind" and self.wind_effect_overlay.pending_food_count is not None:
+            old_count = int(self.wind_effect_overlay.pending_food_count)
+        else:
+            old_count = self.food_count
         if operation == "add":
             target = old_count + int(round(value * quantity))
         elif operation == "subtract":
@@ -1047,9 +1689,28 @@ class GameWindow(QWidget):
                 target = 0
             else:
                 target = int(old_count / (value ** quantity))
+        elif operation == "clear":
+            target = 0
+        elif operation == "wind":
+            target = old_count
+            for _ in range(quantity):
+                percent = random.uniform(0.10, 0.50)
+                change = max(1, int(round(max(1, target) * percent)))
+                if random.choice((True, False)):
+                    target = min(MAX_FOOD_COUNT, target + change)
+                else:
+                    target = max(0, target - change)
         else:
             return
         target = max(0, min(MAX_FOOD_COUNT, target))
+        if operation == "wind":
+            # 先卷起当前全部食物，动画结束后再结算随机增减，避免一触发就
+            # 瞬间删掉一半食物，看不到“全部被刮起来”的效果。
+            self.wind_effect_overlay.start_wind(quantity, target, source)
+            self._raise_gift_effect()
+            if self.stats_overlay.isVisible():
+                self.stats_overlay.raise_()
+            return
         self.change_food_count(target - old_count, source)
 
     def change_food_count(self, delta: int, source: str = "") -> None:
@@ -1060,6 +1721,12 @@ class GameWindow(QWidget):
         actual = self.food_count - old_count
         if actual == 0:
             return
+        if (
+            hasattr(self, "wind_effect_overlay")
+            and self.wind_effect_overlay.active
+            and self.wind_effect_overlay.pending_food_count is not None
+        ):
+            self.wind_effect_overlay.adjust_pending_food_count(actual)
         if actual < 0:
             self.eaten_count += -actual
         self._cancel_drag()
@@ -1088,7 +1755,18 @@ class GameWindow(QWidget):
         if self.log_panel.isVisible():
             self.log_panel.raise_()
         self.toolbar.raise_()
-        self._wake_physics()
+        self._raise_gift_effect()
+        if self.blessing_bubble.isVisible():
+            self.blessing_bubble.reposition()
+            self.blessing_bubble.raise_()
+        if self.stats_overlay.isVisible():
+            self.stats_overlay.raise_()
+        if self.blessing_bubble.isVisible():
+            self.blessing_bubble.raise_()
+        if hasattr(self, "wind_effect_overlay") and self.wind_effect_overlay.active:
+            self.wind_effect_overlay._capture_foods()
+        else:
+            self._wake_physics()
         self._update_count_display()
 
     def _create_food_item(self) -> None:
@@ -1493,6 +2171,8 @@ class GameWindow(QWidget):
         """有新物体或外力时唤醒物理模拟。"""
         if not hasattr(self, "physics_timer"):
             return
+        if hasattr(self, "wind_effect_overlay") and self.wind_effect_overlay.active:
+            return
         # 稳定槽位只做线性下落计算，可以保持更顺滑的动画。
         count = len(self.food_items)
         interval = 16 if count <= 300 else 25 if count <= 1000 else 33
@@ -1572,6 +2252,7 @@ class GameWindow(QWidget):
         self.toolbar.raise_()
         if hasattr(self, "stats_overlay") and self.stats_overlay.isVisible():
             self.stats_overlay.raise_()
+        self._raise_gift_effect()
 
         if all(item.is_sleeping for item in self.food_items):
             self.physics_timer.stop()
@@ -1746,6 +2427,7 @@ class GameWindow(QWidget):
         if self.food_count == 0:
             self.empty_label.raise_()
             self.toolbar.raise_()
+        self._raise_gift_effect()
 
     def begin_food_drag(self, item: FoodItem, global_pos: QPoint) -> None:
         if item not in self.food_items:
@@ -1778,6 +2460,10 @@ class GameWindow(QWidget):
         if self.log_panel.isVisible():
             self.log_panel.raise_()
         self.toolbar.raise_()
+        self._raise_gift_effect()
+        if self.blessing_bubble.isVisible():
+            self.blessing_bubble.reposition()
+            self.blessing_bubble.raise_()
         self.update()
 
     def begin_consumer_drag(self, global_pos: QPoint) -> None:
@@ -1790,6 +2476,10 @@ class GameWindow(QWidget):
         if self.log_panel.isVisible():
             self.log_panel.raise_()
         self.toolbar.raise_()
+        self._raise_gift_effect()
+        if self.blessing_bubble.isVisible():
+            self.blessing_bubble.reposition()
+            self.blessing_bubble.raise_()
 
     def move_consumer_drag(self, global_pos: QPoint) -> None:
         if self._drag_kind != "consumer":
@@ -1807,6 +2497,10 @@ class GameWindow(QWidget):
         if self.log_panel.isVisible():
             self.log_panel.raise_()
         self.toolbar.raise_()
+        self._raise_gift_effect()
+        if self.blessing_bubble.isVisible():
+            self.blessing_bubble.reposition()
+            self.blessing_bubble.raise_()
 
     def finish_consumer_drag(self) -> None:
         if self._drag_kind != "consumer":
@@ -1974,6 +2668,7 @@ class GameWindow(QWidget):
             if self.log_panel.isVisible():
                 self.log_panel.raise_()
             self.toolbar.raise_()
+            self._raise_gift_effect()
             self._drag_items = matched
             self._selection_rect = box
             self._selection_cursor = QPoint(current)
@@ -2077,6 +2772,18 @@ class GameWindow(QWidget):
         valid_items = list(dict.fromkeys(item for item in items if item in self.food_items))
         if not valid_items:
             return
+        # 范围一次吃掉多种食物时，以第一个被吃掉的食物音效为本次提示音，
+        # 避免同时播放大量声音造成爆音。
+        food_sound_map = self.config.get("food_sound_files", {})
+        specific_sound = str(
+            food_sound_map.get(valid_items[0].source_path, "")
+            if isinstance(food_sound_map, dict)
+            else ""
+        )
+        star_wish = bool(
+            self.config.get("active_theme_id") == "stars_jar"
+            and any(Path(item.source_path).name.lower() == "star.png" for item in valid_items)
+        )
         for item in valid_items:
             self.food_items.remove(item)
             self._release_pile_slot(item.pile_slot)
@@ -2089,7 +2796,17 @@ class GameWindow(QWidget):
         self._compact_pile_slots()
         self._sync_food_widgets()
         self._show_eating_effect(eaten)
-        self.sound_player.play("eat")
+        self.sound_player.play_file(specific_sound, "eat")
+        if star_wish:
+            self._show_star_blessing()
+
+    def _show_star_blessing(self) -> None:
+        messages = self.config.get("star_blessings", [])
+        if not isinstance(messages, list):
+            return
+        choices = [str(message).strip() for message in messages if str(message).strip()]
+        if choices:
+            self.blessing_bubble.show_message(random.choice(choices))
 
     def _show_eating_effect(self, eaten: int) -> None:
         self.effect_card.pop(eaten, self.consumer.geometry())
@@ -2206,6 +2923,14 @@ class GameWindow(QWidget):
             self.stats_overlay._clamp_inside_parent()
             if self.stats_overlay.isVisible():
                 self.stats_overlay.raise_()
+        if hasattr(self, "gift_effect_overlay") and self.gift_effect_overlay.isVisible():
+            self.gift_effect_overlay.reposition()
+            self.gift_effect_overlay.raise_()
+        if hasattr(self, "blessing_bubble") and self.blessing_bubble.isVisible():
+            self.blessing_bubble.reposition()
+            self.blessing_bubble.raise_()
+        if hasattr(self, "wind_effect_overlay"):
+            self.wind_effect_overlay.setGeometry(self.rect())
 
     def _interactive_at(self, local_pos: QPoint) -> bool:
         if self.range_active:
@@ -2215,6 +2940,12 @@ class GameWindow(QWidget):
         if self.log_panel.isVisible() and self.log_panel.geometry().contains(local_pos):
             return True
         if self.consumer.geometry().contains(local_pos):
+            return True
+        if (
+            hasattr(self, "gift_effect_overlay")
+            and self.gift_effect_overlay.isVisible()
+            and self.gift_effect_overlay.geometry().contains(local_pos)
+        ):
             return True
         if (
             hasattr(self, "stats_overlay")

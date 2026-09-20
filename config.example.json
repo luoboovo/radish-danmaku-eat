@@ -4,8 +4,16 @@
   "sessdata": "",
   "food_images": [],
   "consumer_image": "",
+  "active_theme_id": "",
+  "star_blessings": [
+    "一切尽意,万事从欢",
+    "顺遂无虞,皆得所愿",
+    "浅予深深,长乐未央",
+    "旦逢良辰,顺颂时宜"
+  ],
+  "custom_templates": [],
   "initial_food_count": 10,
-  "manual_step": 1,
+  "manual_step": 100,
   "food_size": 72,
   "consumer_size": 190,
   "sound_enabled": true,
@@ -15,6 +23,7 @@
     "eat": "",
     "gift": ""
   },
+  "food_sound_files": {},
   "food_image_order": "random",
   "food_layout_mode": "piles",
   "danmaku_match_mode": "exact",
@@ -29,8 +38,13 @@
   "gift_range_rules": [
     {"gift_name": "小花花", "seconds": 10}
   ],
+  "gift_rule_templates": [],
+  "gift_effect_overlay_enabled": true,
+  "gift_effect_position_set": false,
+  "gift_effect_x_ratio": 0.5,
+  "gift_effect_y_ratio": 0.03,
   "range_hit_mode": "intersects",
-  "range_radius": 150,
+  "range_radius": 50,
   "range_pickup_limit": 100,
   "user_cooldown_seconds": 1.0,
   "stats_visible": true,

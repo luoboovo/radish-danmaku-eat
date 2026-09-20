@@ -1,15 +1,15 @@
-; 萝卜弹幕吃吃吃 Windows 安装程序（Inno Setup 6）
-; 构建示例：ISCC.exe /DAppVersion=1.4.0 installer.iss
+; 小萝卜吃吃吃 Windows 安装程序（Inno Setup 6）
+; 构建示例：ISCC.exe /DAppVersion=2.0.0 installer.iss
 
 #ifndef AppVersion
-  #define AppVersion "1.4.0"
+  #define AppVersion "2.0.0"
 #endif
 
-#define AppName "萝卜弹幕吃吃吃"
+#define AppName "小萝卜吃吃吃"
 #define AppPublisher "luoboovo"
 #define AppUrl "https://github.com/luoboovo/radish-danmaku-eat"
-#define PortableExe "radish-danmaku-eat-v" + AppVersion + "-windows.exe"
-#define InstalledExe "萝卜弹幕吃吃吃.exe"
+#define PortableExe "小萝卜吃吃吃-v" + AppVersion + ".exe"
+#define InstalledExe "小萝卜吃吃吃.exe"
 
 [Setup]
 AppId={{D7AE06D0-C5EE-4B6A-95D7-866B02C987AD}
@@ -24,7 +24,7 @@ DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 LicenseFile=LICENSE
 OutputDir=dist
-OutputBaseFilename=radish-danmaku-eat-v{#AppVersion}-setup
+OutputBaseFilename=小萝卜吃吃吃-v{#AppVersion}-安装版
 SetupIconFile=cake.ico
 UninstallDisplayIcon={app}\{#InstalledExe}
 Compression=lzma2/max
@@ -46,6 +46,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 [Files]
 Source: "dist\{#PortableExe}"; DestDir: "{app}"; DestName: "{#InstalledExe}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "gift_images\*"; DestDir: "{app}\gift_images"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#InstalledExe}"; WorkingDir: "{app}"

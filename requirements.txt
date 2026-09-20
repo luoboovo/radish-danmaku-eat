@@ -1,3 +1,4 @@
 PyQt5>=5.15.9,<5.16
+cryptography>=43,<47
 # blivedm 官方未发布到 PyPI；项目随附已核验的官方 1.1.7 wheel，避免 GitHub 网络失败。
 ./vendor/blivedm-1.1.7-py3-none-any.whl

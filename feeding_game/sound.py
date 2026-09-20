@@ -124,6 +124,25 @@ class GameSoundPlayer(QObject):
         self._active_buffer = buffer
         self.audio_output.start(buffer)
 
+    def play_file(self, path: str, fallback_name: str = "eat") -> None:
+        """播放某张食物绑定的独立音效；无效路径自动退回全局事件音效。"""
+        custom_path = str(path).strip()
+        if (
+            self.enabled
+            and custom_path
+            and Path(custom_path).is_file()
+            and self.media_player is not None
+        ):
+            if self.audio_output is not None:
+                self.audio_output.stop()
+            self.media_player.stop()
+            self.media_player.setMedia(
+                QMediaContent(QUrl.fromLocalFile(str(Path(custom_path).resolve())))
+            )
+            self.media_player.play()
+            return
+        self.play(fallback_name)
+
     def stop(self) -> None:
         """停止试听或游戏音效，供运行中切换配置时安全释放。"""
         if self.media_player is not None:

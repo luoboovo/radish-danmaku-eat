@@ -20,13 +20,15 @@ if _qt_platforms.is_dir():
     os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", str(_qt_platforms))
 os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
 
-from PyQt5.QtCore import QObject, Qt
+from PyQt5.QtCore import QObject, Qt, QTimer
 from PyQt5.QtGui import QFont, QIcon
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
 
 from feeding_game.bili_listener import BiliLiveThread
 from feeding_game.config import load_config, save_config
 from feeding_game.game_window import GameWindow
+from feeding_game.license_dialog import LicenseDialog
+from feeding_game.licensing import load_saved_license
 from feeding_game.region_selector import RegionSelector
 from feeding_game.settings_window import SettingsWindow
 
@@ -39,6 +41,7 @@ else:
     BASE_DIR = Path(__file__).resolve().parent
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 CONFIG_PATH = BASE_DIR / "config.json"
+LICENSE_PATH = BASE_DIR / "license.json"
 
 
 class AppController(QObject):
@@ -48,7 +51,7 @@ class AppController(QObject):
         super().__init__()
         self.app = app
         self.config = load_config(CONFIG_PATH)
-        self.settings_window = SettingsWindow(self.config)
+        self.settings_window = SettingsWindow(self.config, BASE_DIR)
         self.settings_window.start_game.connect(self.start_game)
         self.settings_window.apply_config_requested.connect(
             self.apply_current_config
@@ -62,10 +65,20 @@ class AppController(QObject):
         )
         self.settings_window.stats_reset_scale_requested.connect(self._reset_stats_scale)
         self.settings_window.close_game_requested.connect(self.close_game)
+        self.settings_window.license_activation_requested.connect(
+            self._show_license_dialog
+        )
         self.game_window: Optional[GameWindow] = None
         self.region_selector: Optional[RegionSelector] = None
         self.listener: Optional[BiliLiveThread] = None
         self._pending_game_counts: Optional[tuple[int, int]] = None
+        # 限时授权不仅在启动时检查。程序长时间开着跨过到期点时，
+        # 最迟一分钟内也会停止使用，避免必须重启后才发现已过期。
+        self.license_timer = QTimer(self)
+        self.license_timer.setInterval(60_000)
+        self.license_timer.timeout.connect(self._check_runtime_license)
+        self.license_timer.start()
+        self.settings_window.set_license_status(load_saved_license(LICENSE_PATH))
         self.app.aboutToQuit.connect(self.shutdown)
 
     def show(self) -> None:
@@ -139,6 +152,7 @@ class AppController(QObject):
         self.listener.food_delta.connect(self.game_window.apply_external_delta)
         self.listener.food_operation.connect(self.game_window.apply_gift_operation)
         self.listener.range_triggered.connect(self.game_window.trigger_timed_range)
+        self.listener.gift_effect.connect(self.game_window.show_gift_effect)
         self.listener.activity.connect(self.game_window.show_activity)
         self.listener.activity.connect(self.settings_window.show_activity)
         self.listener.start()
@@ -226,6 +240,35 @@ class AppController(QObject):
         self.listener.deleteLater()
         self.listener = None
 
+    def _check_runtime_license(self) -> None:
+        status = load_saved_license(LICENSE_PATH)
+        self.settings_window.set_license_status(status)
+        if status.valid:
+            return
+        self.license_timer.stop()
+        self._dispose_game_window()
+        QMessageBox.critical(
+            self.settings_window,
+            "授权已失效",
+            f"{status.message}\n\n请联系授权方获取新的密钥。",
+        )
+        self.app.quit()
+
+    def _show_license_dialog(self) -> None:
+        """控制台内随时重新激活，成功后立即刷新倒计时。"""
+        current_status = load_saved_license(LICENSE_PATH)
+        dialog = LicenseDialog(
+            LICENSE_PATH,
+            current_status,
+            self.settings_window,
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        refreshed_status = load_saved_license(LICENSE_PATH)
+        self.settings_window.set_license_status(refreshed_status)
+        if refreshed_status.valid and not self.license_timer.isActive():
+            self.license_timer.start()
+
     def shutdown(self) -> None:
         self._stop_listener()
         if self.region_selector is not None:
@@ -242,7 +285,7 @@ def main() -> int:
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
-    app.setApplicationName("萝卜弹幕吃吃吃")
+    app.setApplicationName("小萝卜吃吃吃")
     app.setOrganizationName("RadishDanmakuEat")
     icon_path = RESOURCE_DIR / "cake.svg"
     if icon_path.is_file():
@@ -252,6 +295,11 @@ def main() -> int:
     app_font.setStyleStrategy(QFont.PreferAntialias)
     app.setFont(app_font)
     app.setQuitOnLastWindowClosed(False)
+    license_status = load_saved_license(LICENSE_PATH)
+    if not license_status.valid:
+        activation = LicenseDialog(LICENSE_PATH, license_status)
+        if activation.exec_() != QDialog.Accepted:
+            return 0
     controller = AppController(app)
     controller.show()
     # controller 必须保持引用，否则可能被 Python 垃圾回收。

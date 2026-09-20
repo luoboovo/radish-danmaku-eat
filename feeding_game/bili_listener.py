@@ -19,6 +19,7 @@ class BiliLiveThread(QThread):
     food_operation = pyqtSignal(str, float, int, str)
     range_triggered = pyqtSignal(int, str)
     activity = pyqtSignal(str)
+    gift_effect = pyqtSignal(str, int, str)
 
     def __init__(self, config: dict, parent=None) -> None:
         super().__init__(parent)
@@ -209,15 +210,42 @@ class BiliLiveThread(QThread):
         if not food_rules and duration <= 0:
             return
         source = f"礼物 {message.uname}：{gift_name}×{gift_num}"
+        effect_parts = []
         for rule in food_rules:
+            operation = str(rule.get("operation", "add"))
+            value = float(rule.get("value", 1.0))
             self.food_operation.emit(
-                str(rule.get("operation", "add")),
-                float(rule.get("value", 1.0)),
+                operation,
+                value,
                 gift_num,
                 source,
             )
+            effect_parts.append(self._gift_effect_text(operation, value, gift_num))
         if duration > 0:
-            self.range_triggered.emit(duration, source)
+            # 一条消息中的 num 可能代表连送多个，范围时长也应按数量累计。
+            total_duration = min(86400, duration * gift_num)
+            self.range_triggered.emit(total_duration, source)
+            effect_parts.append(f"范围拾取 {total_duration} 秒")
+        self.gift_effect.emit(gift_name, gift_num, " · ".join(effect_parts))
+
+    @staticmethod
+    def _gift_effect_text(operation: str, value: float, quantity: int) -> str:
+        """把礼物运算转换为观众能直接看懂的浮窗文字。"""
+        if operation in {"add", "subtract"}:
+            total = int(round(value * quantity))
+            action = "投喂" if operation == "add" else "减少"
+            return f"{action} {total} 个"
+        if operation == "clear":
+            return "清空食物"
+        if operation == "wind":
+            if quantity > 1:
+                return f"刮大风 {quantity} 次 · 随机增减 10%～50%"
+            return "刮大风 · 随机增减 10%～50%"
+        number = f"{value:g}"
+        action = "×" if operation == "multiply" else "÷"
+        if quantity > 1:
+            return f"食物连续 {action}{number}（{quantity} 次）"
+        return f"食物 {action}{number}"
 
     def _gift_is_duplicate(self, message) -> bool:
         """仅用 B 站礼物交易 ID 去重，不吞掉同一用户的连续合法礼物。"""

@@ -22,7 +22,7 @@ class RegionSelector(QWidget):
         super().__init__()
         self._anchor: Optional[QPoint] = None
         self._selection: Optional[QRect] = None
-        self.setWindowTitle("萝卜弹幕吃吃吃 · 圈选游戏区域")
+        self.setWindowTitle("小萝卜吃吃吃 · 圈选游戏区域")
         self.setWindowFlags(
             Qt.Tool
             | Qt.FramelessWindowHint

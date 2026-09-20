@@ -8,14 +8,33 @@ from pathlib import Path
 from typing import Any, Dict
 
 
+DEFAULT_STAR_BLESSINGS = [
+    "一切尽意,万事从欢",
+    "顺遂无虞,皆得所愿",
+    "浅予深深,长乐未央",
+    "旦逢良辰,顺颂时宜",
+]
+
+LEGACY_STAR_BLESSINGS = [
+    "愿你的愿望闪闪发光 ✨",
+    "今天也会有好事发生！",
+    "所有期待都在悄悄靠近你。",
+    "愿你被温柔和好运围绕。",
+    "下一颗星星会带来惊喜！",
+]
+
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "version": 2,
     "room_id": "",
     "sessdata": "",
     "food_images": [],
     "consumer_image": "",
+    "active_theme_id": "",
+    "star_blessings": DEFAULT_STAR_BLESSINGS,
+    "custom_templates": [],
     "initial_food_count": 10,
-    "manual_step": 1,
+    "manual_step": 100,
     "food_size": 72,
     "consumer_size": 190,
     "sound_enabled": True,
@@ -25,6 +44,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "eat": "",
         "gift": "",
     },
+    "food_sound_files": {},
     "food_image_order": "random",
     "food_layout_mode": "piles",
     "danmaku_match_mode": "exact",
@@ -39,8 +59,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "gift_range_rules": [
         {"gift_name": "小花花", "seconds": 10},
     ],
+    "gift_rule_templates": [],
+    "gift_effect_overlay_enabled": True,
+    "gift_effect_position_set": False,
+    "gift_effect_x_ratio": 0.5,
+    "gift_effect_y_ratio": 0.03,
     "range_hit_mode": "intersects",
-    "range_radius": 150,
+    "range_radius": 50,
     "range_pickup_limit": 100,
     "user_cooldown_seconds": 1.0,
     "stats_visible": True,
@@ -78,10 +103,51 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
         str(item) for item in config.get("food_images", []) if str(item).strip()
     ]
     config["consumer_image"] = str(config.get("consumer_image", "")).strip()
+    config["active_theme_id"] = str(config.get("active_theme_id", "")).strip()[:40]
+    raw_blessings = config.get("star_blessings", [])
+    if not isinstance(raw_blessings, list):
+        raw_blessings = []
+    normalized_blessings = [
+        str(item).strip()[:80]
+        for item in raw_blessings[:100]
+        if str(item).strip()
+    ]
+    # 将早期版本自带的五句祝福迁移成新版四句；用户自行填写的内容原样保留。
+    if not normalized_blessings or normalized_blessings == LEGACY_STAR_BLESSINGS:
+        normalized_blessings = copy.deepcopy(DEFAULT_STAR_BLESSINGS)
+    config["star_blessings"] = normalized_blessings
+    raw_custom_templates = config.get("custom_templates", [])
+    config["custom_templates"] = []
+    if isinstance(raw_custom_templates, list):
+        seen_template_names = set()
+        for item in raw_custom_templates[:100]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()[:40]
+            if not name or name in seen_template_names:
+                continue
+            raw_template_foods = item.get("food_images", [])
+            if not isinstance(raw_template_foods, list):
+                raw_template_foods = []
+            food_images = [
+                str(path).strip()
+                for path in raw_template_foods
+                if str(path).strip()
+            ]
+            consumer_image = str(item.get("consumer_image", "")).strip()
+            config["custom_templates"].append(
+                {
+                    "name": name,
+                    "food_images": food_images,
+                    "consumer_image": consumer_image,
+                    "theme_id": str(item.get("theme_id", "")).strip()[:40],
+                }
+            )
+            seen_template_names.add(name)
     config["initial_food_count"] = _int_value(
         config.get("initial_food_count"), 10, 0, 100000
     )
-    config["manual_step"] = _int_value(config.get("manual_step"), 1, 1, 10000)
+    config["manual_step"] = _int_value(config.get("manual_step"), 100, 1, 10000)
     config["food_size"] = _int_value(config.get("food_size"), 72, 24, 256)
     config["consumer_size"] = _int_value(
         config.get("consumer_size"), 190, 60, 600
@@ -93,6 +159,14 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
     config["sound_files"] = {
         name: str(raw_sound_files.get(name, "")).strip()
         for name in ("add", "remove", "eat", "gift")
+    }
+    raw_food_sound_files = config.get("food_sound_files", {})
+    if not isinstance(raw_food_sound_files, dict):
+        raw_food_sound_files = {}
+    config["food_sound_files"] = {
+        str(food_path): str(sound_path).strip()
+        for food_path, sound_path in raw_food_sound_files.items()
+        if str(food_path).strip() and str(sound_path).strip()
     }
     # 短暂版本中的 OBS 绿幕配置已经取消，游戏窗口恢复纯透明。
     config.pop("capture_background_color", None)
@@ -113,10 +187,13 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
     # 兼容旧版矩形宽高：第一次读取时取较长边的一半作为圆形半径。
     radius_value = source.get("range_radius")
     if radius_value is None:
-        legacy_width = _int_value(source.get("range_box_width"), 300, 50, 2000)
-        legacy_height = _int_value(source.get("range_box_height"), 220, 50, 2000)
-        radius_value = max(legacy_width, legacy_height) // 2
-    config["range_radius"] = _int_value(radius_value, 150, 25, 1000)
+        if "range_box_width" in source or "range_box_height" in source:
+            legacy_width = _int_value(source.get("range_box_width"), 300, 50, 2000)
+            legacy_height = _int_value(source.get("range_box_height"), 220, 50, 2000)
+            radius_value = max(legacy_width, legacy_height) // 2
+        else:
+            radius_value = DEFAULT_CONFIG["range_radius"]
+    config["range_radius"] = _int_value(radius_value, 50, 25, 1000)
     config["range_pickup_limit"] = _int_value(
         config.get("range_pickup_limit"), 100, 1, 10000
     )
@@ -164,11 +241,26 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
     config["gift_range_rules"] = _normalize_rules(
         config.get("gift_range_rules"), "gift_name", "seconds", 1, 3600
     )
+    config["gift_rule_templates"] = _normalize_gift_rule_templates(
+        config.get("gift_rule_templates")
+    )
+    config["gift_effect_overlay_enabled"] = bool(
+        config.get("gift_effect_overlay_enabled", True)
+    )
+    config["gift_effect_position_set"] = bool(
+        config.get("gift_effect_position_set", False)
+    )
+    config["gift_effect_x_ratio"] = _float_value(
+        config.get("gift_effect_x_ratio"), 0.5, 0.0, 1.0
+    )
+    config["gift_effect_y_ratio"] = _float_value(
+        config.get("gift_effect_y_ratio"), 0.03, 0.0, 1.0
+    )
     return config
 
 
 def _normalize_gift_food_rules(rules: Any) -> list:
-    """整理礼物食物运算，支持增加、减少、乘以和除以。"""
+    """整理礼物食物运算，支持加减乘除、清空和刮大风。"""
     result = []
     if not isinstance(rules, list):
         return result
@@ -177,6 +269,8 @@ def _normalize_gift_food_rules(rules: Any) -> list:
         "subtract": "subtract",
         "multiply": "multiply",
         "divide": "divide",
+        "clear": "clear",
+        "wind": "wind",
         "+": "add",
         "-": "subtract",
         "*": "multiply",
@@ -190,13 +284,55 @@ def _normalize_gift_food_rules(rules: Any) -> list:
         if not gift_name or operation is None:
             continue
         value = _float_value(rule.get("value"), 1.0, 0.01, 10000.0)
-        if operation in {"multiply", "divide"}:
+        if operation in {"clear", "wind"}:
+            value = 1.0
+        elif operation in {"multiply", "divide"}:
             value = max(1.01, value)
         else:
             value = max(1.0, value)
         result.append(
-            {"gift_name": gift_name, "operation": operation, "value": value}
+            {
+                "gift_name": gift_name,
+                "operation": operation,
+                "value": value,
+                **(
+                    {"gift_id": _int_value(rule.get("gift_id"), 0, 0, 999999999)}
+                    if _int_value(rule.get("gift_id"), 0, 0, 999999999)
+                    else {}
+                ),
+            }
         )
+    return result
+
+
+def _normalize_gift_rule_templates(templates: Any) -> list:
+    """整理用户保存的整套礼物规则模板。"""
+    result = []
+    if not isinstance(templates, list):
+        return result
+    seen_names = set()
+    for template in templates[:100]:
+        if not isinstance(template, dict):
+            continue
+        name = str(template.get("name", "")).strip()[:40]
+        if not name or name in seen_names:
+            continue
+        result.append(
+            {
+                "name": name,
+                "gift_food_rules": _normalize_gift_food_rules(
+                    template.get("gift_food_rules")
+                ),
+                "gift_range_rules": _normalize_rules(
+                    template.get("gift_range_rules"),
+                    "gift_name",
+                    "seconds",
+                    1,
+                    3600,
+                ),
+            }
+        )
+        seen_names.add(name)
     return result
 
 
@@ -219,7 +355,12 @@ def _normalize_rules(
         value = _int_value(rule.get(value_key), 1, minimum, maximum)
         if value_key == "delta" and value == 0:
             continue
-        result.append({name_key: name, value_key: value})
+        normalized = {name_key: name, value_key: value}
+        if name_key == "gift_name":
+            gift_id = _int_value(rule.get("gift_id"), 0, 0, 999999999)
+            if gift_id:
+                normalized["gift_id"] = gift_id
+        result.append(normalized)
     return result
 
 

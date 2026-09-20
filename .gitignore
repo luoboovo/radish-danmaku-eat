@@ -14,9 +14,17 @@ Thumbs.db
 
 # 本机配置可能包含 SESSDATA、个人素材绝对路径等敏感信息
 config.json
+license.json
+
+# B站礼物图片运行时下载到程序当前目录，不提交缓存文件
+gift_images/
+template_assets/
+private_license_tools/
+private_dist/
 
 # 构建产物通过 GitHub Releases 分发，不提交到源码仓库
 dist/
 build/
 build-*/
 *.spec
+!小萝卜吃吃吃-v2.0.0.spec
